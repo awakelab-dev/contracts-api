@@ -7,6 +7,7 @@ import vacancies from './routes/vacancies';
 import companies from './routes/companies';
 import interviews from './routes/interviews';
 import internships from './routes/internships';
+import stats from './routes/stats';
 
 const app = express();
 app.use(cors());
@@ -19,5 +20,6 @@ app.use('/vacancies', vacancies);
 app.use('/companies', companies);
 app.use('/interviews', interviews);
 app.use('/internships', internships)
+app.use('/stats', stats)
 
 export default app;
