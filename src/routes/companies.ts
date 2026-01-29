@@ -49,6 +49,33 @@ router.post('/', async (req, res) => {
 });
 
 /**
+ * POST /companies/import - importación masiva de empresas
+ */
+router.post('/import', requireAuth, async (req, res) => {
+  const rows = (req.body?.rows || []) as Array<{ name?: string; sector?: string; email?: string; location?: string }>;
+  if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ error: 'rows must be a non-empty array' });
+  const valid = rows.filter(r => (r.name || '').trim()).map(r => [
+    (r.name || '').trim(),
+    (r.sector || null),
+    (r.email || null),
+    // Guardamos 'location' en notes si viene, para no perder la info
+    (r.location || null)
+  ]);
+  if (valid.length === 0) return res.status(400).json({ error: 'no valid rows' });
+  try {
+    const placeholders = valid.map(() => '(?, ?, ?, ?)').join(',');
+    const sql = `INSERT IGNORE INTO companies (name, sector, contact_email, notes) VALUES ${placeholders}`;
+    const [result] = await pool.query(sql, valid.flat());
+    const inserted = (result as any).affectedRows || 0;
+    const total = rows.length;
+    const skipped = total - inserted;
+    return res.json({ inserted, skipped, total });
+  } catch (e) {
+    return res.status(500).json({ error: 'Error en importación', details: (e as Error).message });
+  }
+});
+
+/**
  * PUT /:id - Actualizar una empresa
  */
 router.put('/:id', async (req, res) => {

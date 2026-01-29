@@ -55,6 +55,40 @@ router.post('/', async (req, res) => {
 });
 
 /**
+ * POST /vacancies/import - importación masiva de vacantes (crea empresa si no existe)
+ */
+router.post('/import', requireAuth, async (req, res) => {
+  const rows = (req.body?.rows || []) as Array<{ title?: string; company_name?: string; sector?: string; location?: string }>;
+  if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ error: 'rows must be a non-empty array' });
+  let inserted = 0;
+  let total = rows.length;
+  try {
+    for (const r of rows) {
+      const title = (r.title || '').trim();
+      const companyName = (r.company_name || '').trim();
+      if (!title || !companyName) continue; // skip inválidas
+      // buscar o crear empresa
+      const [cRows] = await pool.query('SELECT id FROM companies WHERE name = ? LIMIT 1', [companyName]);
+      let companyId = (cRows as any[])[0]?.id as number | undefined;
+      if (!companyId) {
+        const [ins] = await pool.query('INSERT IGNORE INTO companies (name, sector, notes) VALUES (?, ?, ?)', [companyName, r.sector || null, r.location || null]);
+        companyId = (ins as any).insertId || (await (async () => {
+          const [c2] = await pool.query('SELECT id FROM companies WHERE name = ? LIMIT 1', [companyName]);
+          return (c2 as any[])[0]?.id;
+        })());
+      }
+      if (!companyId) continue; // si no se pudo resolver empresa, saltamos
+      const [vres] = await pool.query('INSERT INTO vacancies (company_id, title, sector, status) VALUES (?, ?, ?, ?)', [companyId, title, (r.sector || null), 'open']);
+      if ((vres as any).affectedRows) inserted += 1;
+    }
+    const skipped = total - inserted;
+    return res.json({ inserted, skipped, total });
+  } catch (e) {
+    return res.status(500).json({ error: 'Error en importación', details: (e as Error).message });
+  }
+});
+
+/**
  * PUT /:id - Actualizar una vacante
  */
 router.put('/:id', async (req, res) => {

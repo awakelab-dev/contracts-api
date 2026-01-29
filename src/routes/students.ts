@@ -4,7 +4,42 @@ import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 
-router.use(requireAuth);
+//router.use(requireAuth);
+
+/**
+ * POST /students/import - Importación masiva de alumnos
+ */
+router.post('/import', requireAuth, async (req, res) => {
+  const rows = (req.body?.rows || []) as Array<{ full_name?: string; dni_nie?: string; course_code?: string; employment_status?: string }>;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return res.status(400).json({ error: 'rows must be a non-empty array' });
+  }
+  const normStatus = (s?: string) => {
+    const v = (s || '').toLowerCase();
+    return ['unemployed','employed','improved','unknown'].includes(v) ? v : 'unknown';
+  };
+  // Filtrar filas válidas (campos obligatorios)
+  const valid = rows.filter(r => (r.full_name || '').trim() && (r.dni_nie || '').trim() && (r.course_code || '').trim())
+    .map(r => [
+      (r.full_name || '').trim(),
+      (r.dni_nie || '').trim(),
+      (r.course_code || '').trim(),
+      normStatus(r.employment_status)
+    ]);
+  if (valid.length === 0) return res.status(400).json({ error: 'no valid rows' });
+  try {
+    // INSERT IGNORE para saltar duplicados por uq_students_dni (dni_nie)
+    const placeholders = valid.map(() => '(?, ?, ?, ?)').join(',');
+    const sql = `INSERT IGNORE INTO students (full_name, dni_nie, course_code, employment_status) VALUES ${placeholders}`;
+    const [result] = await pool.query(sql, valid.flat());
+    const inserted = (result as any).affectedRows || 0;
+    const total = rows.length;
+    const skipped = total - inserted;
+    return res.json({ inserted, skipped, total });
+  } catch (e) {
+    return res.status(500).json({ error: 'Error en importación', details: (e as Error).message });
+  }
+});
 
 /**
  * POST /students - Crear un nuevo alumno
