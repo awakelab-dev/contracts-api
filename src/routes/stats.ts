@@ -41,8 +41,8 @@ router.get('/reports', async (_req, res) => {
     pool.query("SELECT COUNT(*) AS total FROM students"),
     pool.query("SELECT COUNT(*) AS employed FROM students WHERE employment_status = 'employed'"),
     pool.query("SELECT COUNT(*) AS interviews FROM interviews"),
-    pool.query("SELECT COUNT(*) AS contracts FROM employment_contracts"),
-    pool.query("SELECT COUNT(*) AS hospitality FROM employment_contracts WHERE sector = 'Hostelería'")
+    pool.query("SELECT COUNT(*) AS contracts FROM hiring_contracts"),
+    pool.query("SELECT COUNT(*) AS hospitality FROM hiring_contracts WHERE sector = 'Hostelería'")
   ]);
 
   // 2. Extraemos los valores de las filas (el primer elemento del resultado)

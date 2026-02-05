@@ -28,7 +28,7 @@ router.get('/', async (_req, res) => {
  * POST / - Crear una nueva vacante
  */
 router.post('/', async (req, res) => {
-  const { company_id, title, sector, requirements, status, deadline } = req.body;
+  const { company_id, title, sector, description, requirements, status } = req.body;
 
   if (!company_id || !title) {
     return res.status(400).json({ error: 'La empresa y el título son obligatorios' });
@@ -36,16 +36,16 @@ router.post('/', async (req, res) => {
 
   try {
     const query = `
-      INSERT INTO vacancies (company_id, title, sector, requirements, status, deadline)
+      INSERT INTO vacancies (company_id, title, sector, description, requirements, status)
       VALUES (?, ?, ?, ?, ?, ?)
     `;
     const [result] = await pool.query(query, [
       company_id,
       title,
       sector || null,
+      description || null,
       requirements || null,
       status || 'open',
-      deadline || null
     ]);
 
     res.status(201).json({ message: 'Vacante creada con éxito', id: (result as any).insertId });
@@ -93,21 +93,21 @@ router.post('/import', requireAuth, async (req, res) => {
  */
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
-  const { title, sector, requirements, status, deadline } = req.body;
+  const { title, sector, description, requirements, status } = req.body;
 
   try {
     const query = `
       UPDATE vacancies 
-      SET title = ?, sector = ?, requirements = ?, status = ?, deadline = ?
+      SET title = ?, sector = ?, description = ?, requirements = ?, status = ?
       WHERE id = ?
     `;
     await pool.query(query, [
       title,
       sector || null,
+      description || null,
       requirements || null,
       status || 'open',
-      deadline || null,
-      id
+      id,
     ]);
     res.json({ message: 'Vacante actualizada con éxito' });
   } catch (e) {

@@ -7,6 +7,10 @@ import vacancies from './routes/vacancies';
 import companies from './routes/companies';
 import interviews from './routes/interviews';
 import internships from './routes/internships';
+import invitations from './routes/invitations';
+import studentCourses from './routes/studentCourses';
+import pnl from './routes/pnl';
+import hiringContracts from './routes/hiringContracts';
 import stats from './routes/stats';
 
 const app = express();
@@ -19,7 +23,11 @@ app.use('/students', students);
 app.use('/vacancies', vacancies);
 app.use('/companies', companies);
 app.use('/interviews', interviews);
-app.use('/internships', internships)
-app.use('/stats', stats)
+app.use('/internships', internships);
+app.use('/invitations', invitations);
+app.use('/student-courses', studentCourses);
+app.use('/pnl', pnl);
+app.use('/hiring-contracts', hiringContracts);
+app.use('/stats', stats);
 
 export default app;

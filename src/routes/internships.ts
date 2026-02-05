@@ -12,7 +12,7 @@ router.use(requireAuth);
 router.get('/', async (_req, res) => {
   try {
     const [rows] = await pool.query(`
-      SELECT i.*, s.full_name as student_name 
+      SELECT i.*, CONCAT_WS(' ', s.first_names, s.last_names) as student_name 
       FROM internships i 
       JOIN students s ON i.student_id = s.id
     `);
