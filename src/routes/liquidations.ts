@@ -203,6 +203,71 @@ async function computeAddedFteDaysByStudentId(conn: any, start: Date, end: Date,
   return { students, added: addedRounded };
 }
 
+async function computeEligibleFromByStudentId(conn: any, minStart: Date | null, end: Date, studentIds?: number[]) {
+  const endIso = toISODate(end);
+  const lowerIso = toISODate(minStart || new Date(Date.UTC(1970, 0, 1)));
+
+  const params: any[] = [endIso, lowerIso];
+  let studentFilterSql = '';
+  if (studentIds && studentIds.length) {
+    const placeholders = studentIds.map(() => '?').join(',');
+    studentFilterSql = ` AND hc.student_id IN (${placeholders}) `;
+    params.push(...studentIds);
+  }
+
+  const [rows] = await conn.query(
+    `
+      SELECT
+        hc.student_id,
+        hc.start_date,
+        hc.end_date
+      FROM hiring_contracts hc
+      WHERE
+        hc.contributed_days IS NOT NULL
+        AND hc.contributed_days > 0
+        AND hc.start_date <= ?
+        AND (hc.end_date IS NULL OR hc.end_date >= ?)
+        ${studentFilterSql}
+    `,
+    params
+  );
+
+  const eligibleFrom = new Map<number, Date>();
+  for (const r of rows as any[]) {
+    const student_id = Number(r.student_id);
+    if (!Number.isFinite(student_id)) continue;
+
+    const startStr = valueToISODateString(r.start_date) || valueToISODateString(norm(r.start_date));
+    const contractStart = startStr ? parseISODateUTC(startStr) : null;
+    if (!contractStart) continue;
+
+    const endStr = r.end_date ? valueToISODateString(r.end_date) || valueToISODateString(norm(r.end_date)) : null;
+    const contractEnd = endStr ? parseISODateUTC(endStr) : end;
+    if (!contractEnd) continue;
+
+    if (contractEnd.getTime() < contractStart.getTime()) continue;
+    if (minStart && contractEnd.getTime() < minStart.getTime()) continue;
+
+    const firstEligible = minStart ? maxDate(contractStart, minStart) : contractStart;
+    const prev = eligibleFrom.get(student_id);
+    if (!prev || firstEligible.getTime() < prev.getTime()) {
+      eligibleFrom.set(student_id, firstEligible);
+    }
+  }
+
+  let minEligible: Date | null = null;
+  for (const d of eligibleFrom.values()) {
+    if (!minEligible || d.getTime() < minEligible.getTime()) minEligible = d;
+  }
+
+  const eligibleFromIso = new Map<number, string>();
+  for (const [sid, d] of eligibleFrom.entries()) {
+    eligibleFromIso.set(sid, toISODate(d));
+  }
+
+  return { eligibleFromByStudentId: eligibleFromIso, minEligibleDate: minEligible ? toISODate(minEligible) : null };
+}
+
 async function getStudentNames(conn: any, studentIds: number[]) {
   if (!studentIds.length) return new Map<number, { first_names: string; last_names: string }>();
   const placeholders = studentIds.map(() => '?').join(',');
@@ -248,19 +313,28 @@ router.get('/preview', async (req, res) => {
 
     const userStart = parseISODateUTC(norm(req.query.start_date));
 
+    const studentIds = parseStudentIdsParam(req.query.student_ids);
+
     // Procesamos días nuevos a partir del último cierre (permite rangos solapados sin duplicar días).
     const [lastRows] = await pool.query('SELECT MAX(end_date) AS last_end_date FROM liquidations');
     const lastEndStr = valueToISODateString((lastRows as any[])[0]?.last_end_date);
     const lastEnd = lastEndStr ? parseISODateUTC(lastEndStr) : null;
     const minStart = lastEnd ? addDaysUTC(lastEnd, 1) : null;
 
-    if (minStart && userStart && userStart.getTime() > minStart.getTime()) {
-      return res.status(400).json({
-        error: `La fecha 'Desde' no puede ser posterior al siguiente día del último cierre (${toISODate(minStart)}).`,
-      });
-    }
+    // Fecha elegible más antigua por alumno (desde último cierre) y mínima global.
+    const { eligibleFromByStudentId, minEligibleDate } = await computeEligibleFromByStudentId(
+      pool,
+      minStart,
+      end,
+      studentIds.length ? studentIds : undefined
+    );
 
-    const start = minStart || userStart || new Date(Date.UTC(1970, 0, 1));
+    // Start efectivo:
+    // - si el usuario elige "Desde", respetamos su fecha, pero nunca antes del último cierre (para no duplicar días).
+    // - si no elige "Desde", usamos la fecha elegible más antigua.
+    // - si no hay elegibles, usamos minStart (si existe) o el mismo end.
+    let start = userStart || (minEligibleDate ? parseISODateUTC(minEligibleDate) : null) || minStart || end;
+    if (minStart) start = maxDate(start, minStart);
 
     if (end.getTime() < start.getTime()) {
       if (lastEndStr) {
@@ -270,8 +344,6 @@ router.get('/preview', async (req, res) => {
       }
       return res.status(400).json({ error: 'end_date must be >= start_date' });
     }
-
-    const studentIds = parseStudentIdsParam(req.query.student_ids);
 
     const balances = await getBalancesByStudentId(pool, studentIds.length ? studentIds : undefined);
     const { students: studentsFromContracts, added } = await computeAddedFteDaysByStudentId(
@@ -308,6 +380,7 @@ router.get('/preview', async (req, res) => {
           student_id: sid,
           first_names: info.first_names,
           last_names: info.last_names,
+          eligible_from_date: eligibleFromByStudentId.get(sid) || null,
           opening_fte_days: opening,
           added_fte_days: addedDays,
           available_fte_days: available,
@@ -335,6 +408,7 @@ router.get('/preview', async (req, res) => {
     return res.json({
       start_date: toISODate(start),
       end_date: toISODate(end),
+      min_eligible_date: minEligibleDate,
       target,
       mode,
       target_fte_days,
@@ -436,14 +510,17 @@ router.post('/', async (req, res) => {
     const lastEnd = lastEndStr ? parseISODateUTC(lastEndStr) : null;
     const minStart = lastEnd ? addDaysUTC(lastEnd, 1) : null;
 
-    if (minStart && userStart && userStart.getTime() > minStart.getTime()) {
-      await conn.rollback();
-      return res.status(400).json({
-        error: `La fecha 'Desde' no puede ser posterior al siguiente día del último cierre (${toISODate(minStart)}).`,
-      });
-    }
+    // Fecha elegible más antigua por alumno (desde último cierre) y mínima global.
+    const { minEligibleDate } = await computeEligibleFromByStudentId(
+      conn,
+      minStart,
+      end,
+      studentIds.length ? studentIds : undefined
+    );
 
-    const start = minStart || userStart || new Date(Date.UTC(1970, 0, 1));
+    // Start efectivo (ver preview): max(userStart, minStart) o por defecto minEligibleDate.
+    let start = userStart || (minEligibleDate ? parseISODateUTC(minEligibleDate) : null) || minStart || end;
+    if (minStart) start = maxDate(start, minStart);
 
     if (end.getTime() < start.getTime()) {
       await conn.rollback();
