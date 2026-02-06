@@ -4,7 +4,18 @@ dotenv.config();
 
 export const env = {
   PORT: parseInt(process.env.PORT || '4000', 10),
+  NODE_ENV: process.env.NODE_ENV || 'development',
+
+  // Auth
   JWT_SECRET: process.env.JWT_SECRET || 'change-me',
+  ADMIN_USERNAME: process.env.ADMIN_USERNAME || 'admin',
+  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || '',
+  ADMIN_PASSWORD_HASH: process.env.ADMIN_PASSWORD_HASH || '',
+  AUTH_COOKIE_NAME: process.env.AUTH_COOKIE_NAME || 'contracts_session',
+  AUTH_SESSION_HOURS: parseInt(process.env.AUTH_SESSION_HOURS || '8', 10),
+
+  // CORS
+  CORS_ORIGIN: process.env.CORS_ORIGIN || 'http://localhost:5173',
 
   DB_HOST: process.env.DB_HOST || 'localhost',
   DB_USER: process.env.DB_USER || 'root',
