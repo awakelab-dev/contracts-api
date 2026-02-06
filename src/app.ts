@@ -13,6 +13,7 @@ import pnl from './routes/pnl';
 import hiringContracts from './routes/hiringContracts';
 import liquidations from './routes/liquidations';
 import stats from './routes/stats';
+import matching from './routes/matching';
 
 const app = express();
 app.use(cors());
@@ -31,5 +32,6 @@ app.use('/pnl', pnl);
 app.use('/hiring-contracts', hiringContracts);
 app.use('/liquidations', liquidations);
 app.use('/stats', stats);
+app.use('/matching', matching);
 
 export default app;
