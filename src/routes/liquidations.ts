@@ -36,6 +36,12 @@ function toISODate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
+function addDaysUTC(d: Date, days: number): Date {
+  const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  x.setUTCDate(x.getUTCDate() + days);
+  return x;
+}
+
 function daysBetweenInclusive(a: Date, b: Date): number {
   const msPerDay = 24 * 60 * 60 * 1000;
   const start = Date.UTC(a.getUTCFullYear(), a.getUTCMonth(), a.getUTCDate());
@@ -236,10 +242,32 @@ router.get('/preview', async (req, res) => {
     }
 
     const today = new Date();
-    const end = parseISODateUTC(norm(req.query.end_date)) || new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
-    const start = parseISODateUTC(norm(req.query.start_date)) || new Date(Date.UTC(1970, 0, 1));
+    const end =
+      parseISODateUTC(norm(req.query.end_date)) ||
+      new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+
+    const userStart = parseISODateUTC(norm(req.query.start_date));
+
+    // Procesamos días nuevos a partir del último cierre (permite rangos solapados sin duplicar días).
+    const [lastRows] = await pool.query('SELECT MAX(end_date) AS last_end_date FROM liquidations');
+    const lastEndStr = valueToISODateString((lastRows as any[])[0]?.last_end_date);
+    const lastEnd = lastEndStr ? parseISODateUTC(lastEndStr) : null;
+    const minStart = lastEnd ? addDaysUTC(lastEnd, 1) : null;
+
+    if (minStart && userStart && userStart.getTime() > minStart.getTime()) {
+      return res.status(400).json({
+        error: `La fecha 'Desde' no puede ser posterior al siguiente día del último cierre (${toISODate(minStart)}).`,
+      });
+    }
+
+    const start = minStart || userStart || new Date(Date.UTC(1970, 0, 1));
 
     if (end.getTime() < start.getTime()) {
+      if (lastEndStr) {
+        return res.status(400).json({
+          error: `No hay días nuevos para liquidar. Último cierre: ${lastEndStr}.`,
+        });
+      }
       return res.status(400).json({ error: 'end_date must be >= start_date' });
     }
 
@@ -390,25 +418,39 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'mode must be individual or pooled' });
   }
 
-  const start = parseISODateUTC(start_date) || new Date(Date.UTC(1970, 0, 1));
   const end = parseISODateUTC(end_date);
   if (!end) return res.status(400).json({ error: 'end_date is required (YYYY-MM-DD)' });
-  if (end.getTime() < start.getTime()) return res.status(400).json({ error: 'end_date must be >= start_date' });
 
+  const userStart = parseISODateUTC(start_date);
   const target_fte_days = TARGET_FTE_DAYS[target];
 
   const conn = await (pool as any).getConnection();
   try {
     await conn.beginTransaction();
 
-    // Evitar solapamientos: no se puede liquidar dos veces el mismo periodo.
-    const [overlap] = await conn.query(
-      'SELECT id, start_date, end_date FROM liquidations WHERE start_date <= ? AND end_date >= ? LIMIT 1',
-      [toISODate(end), toISODate(start)]
+    // Permitimos rangos solapados, pero solo computamos días nuevos a partir del último cierre (para no duplicar días ya liquidados).
+    const [last] = await conn.query(
+      'SELECT end_date FROM liquidations ORDER BY end_date DESC, id DESC LIMIT 1 FOR UPDATE'
     );
-    if ((overlap as any[]).length) {
+    const lastEndStr = valueToISODateString((last as any[])[0]?.end_date);
+    const lastEnd = lastEndStr ? parseISODateUTC(lastEndStr) : null;
+    const minStart = lastEnd ? addDaysUTC(lastEnd, 1) : null;
+
+    if (minStart && userStart && userStart.getTime() > minStart.getTime()) {
       await conn.rollback();
-      return res.status(409).json({ error: 'Ya existe una liquidación que se solapa con ese rango de fechas', overlap: (overlap as any[])[0] });
+      return res.status(400).json({
+        error: `La fecha 'Desde' no puede ser posterior al siguiente día del último cierre (${toISODate(minStart)}).`,
+      });
+    }
+
+    const start = minStart || userStart || new Date(Date.UTC(1970, 0, 1));
+
+    if (end.getTime() < start.getTime()) {
+      await conn.rollback();
+      if (lastEndStr) {
+        return res.status(400).json({ error: `No hay días nuevos para liquidar. Último cierre: ${lastEndStr}.` });
+      }
+      return res.status(400).json({ error: 'end_date must be >= start_date' });
     }
 
     const balances = await getBalancesByStudentId(conn, studentIds.length ? studentIds : undefined);
@@ -432,6 +474,26 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'No hay alumnos con días cotizados para liquidar en el rango seleccionado' });
     }
 
+    // Allocations
+    const sorted = mode === 'pooled'
+      ? [...candidates].sort((a, b) => b.available - a.available)
+      : [...candidates].sort((a, b) => a.sid - b.sid);
+
+    const totalJornadasPossible =
+      mode === 'pooled'
+        ? Math.floor(round2(sorted.reduce((acc, s) => acc + s.available, 0)) / target_fte_days)
+        : sorted.reduce((acc, s) => acc + Math.floor(s.available / target_fte_days), 0);
+
+    if (totalJornadasPossible < 1) {
+      await conn.rollback();
+      return res.status(400).json({
+        error:
+          mode === 'individual'
+            ? 'No se puede ejecutar la liquidación: ningún alumno alcanza el mínimo para 1 jornada completa.'
+            : 'No se puede ejecutar la liquidación: el total combinado no alcanza el mínimo para 1 jornada completa.',
+      });
+    }
+
     // Inserta la cabecera de liquidación (totales se actualizan al final)
     const [ins] = await conn.query(
       `
@@ -443,18 +505,12 @@ router.post('/', async (req, res) => {
     );
     const liquidationId = (ins as any).insertId as number;
 
-    // Allocations
-    const sorted = mode === 'pooled'
-      ? [...candidates].sort((a, b) => b.available - a.available)
-      : [...candidates].sort((a, b) => a.sid - b.sid);
-
     let totalJornadas = 0;
     let totalUsed = 0;
 
     let poolRemainingToUse = 0;
     if (mode === 'pooled') {
-      const poolTotal = round2(sorted.reduce((acc, s) => acc + s.available, 0));
-      totalJornadas = Math.floor(poolTotal / target_fte_days);
+      totalJornadas = totalJornadasPossible;
       poolRemainingToUse = round2(totalJornadas * target_fte_days);
     }
 
