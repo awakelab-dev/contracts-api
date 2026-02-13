@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { pool } from '../db/pool';
-import { requireAuth } from '../middleware/auth';
+import { pool } from '../db/pool.js';
+import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
 router.use(requireAuth);

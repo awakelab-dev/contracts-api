@@ -1,21 +1,21 @@
 import express from "express";
 import cors from "cors";
-import health from "./routes/health";
-import auth from "./routes/auth";
-import students from "./routes/students";
-import vacancies from "./routes/vacancies";
-import companies from "./routes/companies";
-import interviews from "./routes/interviews";
-import internships from "./routes/internships";
-import invitations from "./routes/invitations";
-import studentCourses from "./routes/studentCourses";
-import pnl from "./routes/pnl";
-import hiringContracts from "./routes/hiringContracts";
-import liquidations from "./routes/liquidations";
-import stats from "./routes/stats";
-import matching from "./routes/matching";
-import { env } from "./config/env";
-import { requireAuth } from "./middleware/auth";
+import health from "./routes/health.js";
+import auth from "./routes/auth.js";
+import students from "./routes/students.js";
+import vacancies from "./routes/vacancies.js";
+import companies from "./routes/companies.js";
+import interviews from "./routes/interviews.js";
+import internships from "./routes/internships.js";
+import invitations from "./routes/invitations.js";
+import studentCourses from "./routes/studentCourses.js";
+import pnl from "./routes/pnl.js";
+import hiringContracts from "./routes/hiringContracts.js";
+import liquidations from "./routes/liquidations.js";
+import stats from "./routes/stats.js";
+import matching from "./routes/matching.js";
+import { env } from "./config/env.js";
+import { requireAuth } from "./middleware/auth.js";
 
 const app = express();
 

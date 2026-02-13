@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { pool } from '../db/pool';
-import { requireAuth } from '../middleware/auth';
-import { env } from '../config/env';
+import { pool } from '../db/pool.js';
+import { requireAuth } from '../middleware/auth.js';
+import { env } from '../config/env.js';
 
 const router = Router();
 router.use(requireAuth);
