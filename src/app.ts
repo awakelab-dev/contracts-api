@@ -18,6 +18,7 @@ import { env } from "./config/env.js";
 import { requireAuth } from "./middleware/auth.js";
 
 const app = express();
+const apiRouter = express.Router();
 
 const allowedOrigins = env.CORS_ORIGIN.split(",")
   .map((s) => s.trim())
@@ -30,24 +31,27 @@ app.use(
   })
 );
 app.use(express.json());
-
-app.use("/health", health);
-app.use("/auth", auth);
+apiRouter.use("/health", health);
+apiRouter.use("/auth", auth);
 
 // Everything below requires auth
-app.use(requireAuth);
+apiRouter.use(requireAuth);
 
-app.use("/students", students);
-app.use("/vacancies", vacancies);
-app.use("/companies", companies);
-app.use("/interviews", interviews);
-app.use("/internships", internships);
-app.use("/invitations", invitations);
-app.use("/student-courses", studentCourses);
-app.use("/pnl", pnl);
-app.use("/hiring-contracts", hiringContracts);
-app.use("/liquidations", liquidations);
-app.use("/stats", stats);
-app.use("/matching", matching);
+apiRouter.use("/students", students);
+apiRouter.use("/vacancies", vacancies);
+apiRouter.use("/companies", companies);
+apiRouter.use("/interviews", interviews);
+apiRouter.use("/internships", internships);
+apiRouter.use("/invitations", invitations);
+apiRouter.use("/student-courses", studentCourses);
+apiRouter.use("/pnl", pnl);
+apiRouter.use("/hiring-contracts", hiringContracts);
+apiRouter.use("/liquidations", liquidations);
+apiRouter.use("/stats", stats);
+apiRouter.use("/matching", matching);
+
+// Support both "/..." and "/api/..." prefixes (local vs deployed setups).
+app.use("/api", apiRouter);
+app.use("/", apiRouter);
 
 export default app;
