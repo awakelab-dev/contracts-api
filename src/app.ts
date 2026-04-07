@@ -3,6 +3,7 @@ import cors from "cors";
 import health from "./routes/health.js";
 import auth from "./routes/auth.js";
 import students from "./routes/students.js";
+import locations from "./routes/locations.js";
 import vacancies from "./routes/vacancies.js";
 import companies from "./routes/companies.js";
 import interviews from "./routes/interviews.js";
@@ -38,6 +39,7 @@ apiRouter.use("/auth", auth);
 apiRouter.use(requireAuth);
 
 apiRouter.use("/students", students);
+apiRouter.use("/locations", locations);
 apiRouter.use("/vacancies", vacancies);
 apiRouter.use("/companies", companies);
 apiRouter.use("/interviews", interviews);

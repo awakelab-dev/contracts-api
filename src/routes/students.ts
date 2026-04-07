@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import { pool } from '../db/pool.js';
-import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -16,13 +15,62 @@ type StudentPayload = {
   birth_date: string | null;
   age: number | null;
   sex: SexValue;
-  district: string | null;
-  municipality: string | null;
+  district_code: number | null;
+  municipality_code: number | null;
+  district_name: string | null;
+  municipality_name: string | null;
   phone: string | null;
   email: string | null;
   employment_status: EmploymentStatus;
   notes: string | null;
 };
+
+type DistrictRow = {
+  code: number;
+  municipality_code: number;
+  name: string;
+};
+
+type MunicipalityRow = {
+  code: number;
+  name: string;
+};
+
+type LocationCatalog = {
+  municipalitiesByCode: Map<number, MunicipalityRow>;
+  municipalitiesByNameKey: Map<string, MunicipalityRow>;
+  districtsByCode: Map<number, DistrictRow>;
+  districtsByMunicipalityAndKey: Map<string, DistrictRow>;
+  districtsByNameKey: Map<string, DistrictRow[]>;
+  maxMunicipalityCode: number;
+  maxDistrictCode: number;
+};
+
+const STUDENT_SELECT = `
+  SELECT
+    s.id,
+    s.expediente,
+    s.first_names,
+    s.last_names,
+    s.dni_nie,
+    s.social_security_number,
+    s.birth_date,
+    s.age,
+    s.sex,
+    s.district_code,
+    s.municipality_code,
+    d.name AS district,
+    m.name AS municipality,
+    s.phone,
+    s.email,
+    s.practices_start,
+    s.practices_end,
+    s.employment_status,
+    s.notes
+  FROM students s
+  LEFT JOIN districts d ON d.code = s.district_code
+  LEFT JOIN municipalities m ON m.code = s.municipality_code
+`;
 
 const compactSpaces = (value: string) => value.replace(/\s+/g, ' ').trim();
 const norm = (value: unknown) => compactSpaces((value ?? '').toString().replace(/\u00A0/g, ' '));
@@ -30,6 +78,19 @@ const toNull = (value: unknown) => {
   const cleaned = norm(value);
   return cleaned ? cleaned : null;
 };
+const normalizeCode = (value: unknown) => {
+  const cleaned = norm(value);
+  if (!cleaned) return null;
+  if (!/^\d+$/.test(cleaned)) return null;
+  const parsed = Number.parseInt(cleaned, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+};
+const normalizeLocationKey = (value: string) =>
+  compactSpaces(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
 
 const normalizeExpediente = (value: unknown) => norm(value).toUpperCase();
 const normalizeDocument = (value: unknown) => norm(value).replace(/\s+/g, '').toUpperCase();
@@ -167,10 +228,16 @@ function normalizeStudentInput(raw: Record<string, unknown>): StudentPayload {
     sex: normalizeSex(
       pickValue(raw, ['sex', 'sexo', 'SEXO'])
     ),
-    district: toNull(
+    district_code: normalizeCode(
+      pickValue(raw, ['district_code', 'codigo_distrito', 'DISTRICT_CODE'])
+    ),
+    municipality_code: normalizeCode(
+      pickValue(raw, ['municipality_code', 'codigo_municipio', 'MUNICIPALITY_CODE'])
+    ),
+    district_name: toNull(
       pickValue(raw, ['district', 'distrito', 'DISTRITO'])
     ),
-    municipality: toNull(
+    municipality_name: toNull(
       pickValue(raw, ['municipality', 'municipio', 'MUNICIPIO COMUNIDAD DE MADRID'])
     ),
     phone: toNull(
@@ -188,10 +255,231 @@ function normalizeStudentInput(raw: Record<string, unknown>): StudentPayload {
   };
 }
 
+function districtMunicipalityKey(municipalityCode: number, districtName: string) {
+  return `${municipalityCode}::${normalizeLocationKey(districtName)}`;
+}
+
+function registerMunicipality(catalog: LocationCatalog, municipality: MunicipalityRow) {
+  catalog.municipalitiesByCode.set(municipality.code, municipality);
+  catalog.municipalitiesByNameKey.set(normalizeLocationKey(municipality.name), municipality);
+  catalog.maxMunicipalityCode = Math.max(catalog.maxMunicipalityCode, municipality.code);
+}
+
+function registerDistrict(catalog: LocationCatalog, district: DistrictRow) {
+  catalog.districtsByCode.set(district.code, district);
+  catalog.districtsByMunicipalityAndKey.set(
+    districtMunicipalityKey(district.municipality_code, district.name),
+    district
+  );
+  const nameKey = normalizeLocationKey(district.name);
+  const list = catalog.districtsByNameKey.get(nameKey) ?? [];
+  list.push(district);
+  catalog.districtsByNameKey.set(nameKey, list);
+  catalog.maxDistrictCode = Math.max(catalog.maxDistrictCode, district.code);
+}
+
+function nextMunicipalityCode(catalog: LocationCatalog) {
+  catalog.maxMunicipalityCode += 1;
+  return catalog.maxMunicipalityCode;
+}
+
+function nextDistrictCode(catalog: LocationCatalog) {
+  catalog.maxDistrictCode += 1;
+  return catalog.maxDistrictCode;
+}
+
+async function loadLocationCatalog(): Promise<LocationCatalog> {
+  const [municipalityRowsRaw] = await pool.query('SELECT code, name FROM municipalities ORDER BY code ASC');
+  const [districtRowsRaw] = await pool.query(
+    'SELECT code, municipality_code, name FROM districts ORDER BY code ASC'
+  );
+
+  const catalog: LocationCatalog = {
+    municipalitiesByCode: new Map<number, MunicipalityRow>(),
+    municipalitiesByNameKey: new Map<string, MunicipalityRow>(),
+    districtsByCode: new Map<number, DistrictRow>(),
+    districtsByMunicipalityAndKey: new Map<string, DistrictRow>(),
+    districtsByNameKey: new Map<string, DistrictRow[]>(),
+    maxMunicipalityCode: 0,
+    maxDistrictCode: 0,
+  };
+
+  for (const row of municipalityRowsRaw as MunicipalityRow[]) {
+    registerMunicipality(catalog, row);
+  }
+
+  for (const row of districtRowsRaw as DistrictRow[]) {
+    registerDistrict(catalog, row);
+  }
+
+  return catalog;
+}
+
+async function insertMunicipalities(rows: MunicipalityRow[]) {
+  if (!rows.length) return;
+  const placeholders = rows.map(() => '(?, ?)').join(',');
+  await pool.query(
+    `INSERT INTO municipalities (code, name) VALUES ${placeholders}
+     ON DUPLICATE KEY UPDATE name = VALUES(name)`,
+    rows.flatMap((r) => [r.code, r.name])
+  );
+}
+
+async function insertDistricts(rows: DistrictRow[]) {
+  if (!rows.length) return;
+  const placeholders = rows.map(() => '(?, ?, ?)').join(',');
+  await pool.query(
+    `INSERT INTO districts (code, municipality_code, name) VALUES ${placeholders}
+     ON DUPLICATE KEY UPDATE municipality_code = VALUES(municipality_code), name = VALUES(name)`,
+    rows.flatMap((r) => [r.code, r.municipality_code, r.name])
+  );
+}
+
+async function hydrateLocationCodes(rows: StudentPayload[], allowCreate: boolean) {
+  if (!rows.length) return;
+
+  const catalog = await loadLocationCatalog();
+  const newMunicipalities: MunicipalityRow[] = [];
+  const newDistricts: DistrictRow[] = [];
+
+  for (const row of rows) {
+    let municipalityCode = row.municipality_code;
+    let districtCode = row.district_code;
+    const municipalityName = row.municipality_name ? compactSpaces(row.municipality_name) : null;
+    const districtName = row.district_name ? compactSpaces(row.district_name) : null;
+
+    if (municipalityCode) {
+      const existing = catalog.municipalitiesByCode.get(municipalityCode);
+      if (existing) {
+        if (
+          municipalityName &&
+          normalizeLocationKey(existing.name) !== normalizeLocationKey(municipalityName)
+        ) {
+          throw new Error('El código de municipio no coincide con el nombre indicado');
+        }
+      } else {
+        if (!allowCreate || !municipalityName) {
+          throw new Error(`Municipio no válido: ${municipalityCode}`);
+        }
+        const byName = catalog.municipalitiesByNameKey.get(normalizeLocationKey(municipalityName));
+        if (byName) {
+          municipalityCode = byName.code;
+        } else {
+          const created: MunicipalityRow = { code: municipalityCode, name: municipalityName };
+          registerMunicipality(catalog, created);
+          newMunicipalities.push(created);
+        }
+      }
+    } else if (municipalityName) {
+      const existing = catalog.municipalitiesByNameKey.get(normalizeLocationKey(municipalityName));
+      if (existing) {
+        municipalityCode = existing.code;
+      } else {
+        if (!allowCreate) {
+          throw new Error(`Municipio no encontrado: ${municipalityName}`);
+        }
+        municipalityCode = nextMunicipalityCode(catalog);
+        const created: MunicipalityRow = { code: municipalityCode, name: municipalityName };
+        registerMunicipality(catalog, created);
+        newMunicipalities.push(created);
+      }
+    }
+
+    if (districtCode) {
+      const existing = catalog.districtsByCode.get(districtCode);
+      if (existing) {
+        if (
+          districtName &&
+          normalizeLocationKey(existing.name) !== normalizeLocationKey(districtName)
+        ) {
+          throw new Error('El código de distrito no coincide con el nombre indicado');
+        }
+        if (municipalityCode && existing.municipality_code !== municipalityCode) {
+          throw new Error('El distrito no pertenece al municipio seleccionado');
+        }
+        municipalityCode = municipalityCode ?? existing.municipality_code;
+      } else {
+        if (!allowCreate || !districtName || !municipalityCode) {
+          throw new Error(`Distrito no válido: ${districtCode}`);
+        }
+        const existingByPair = catalog.districtsByMunicipalityAndKey.get(
+          districtMunicipalityKey(municipalityCode, districtName)
+        );
+        if (existingByPair) {
+          districtCode = existingByPair.code;
+        } else {
+          const created: DistrictRow = {
+            code: districtCode,
+            municipality_code: municipalityCode,
+            name: districtName,
+          };
+          registerDistrict(catalog, created);
+          newDistricts.push(created);
+        }
+      }
+    } else if (districtName) {
+      if (!municipalityCode) {
+        const candidates = catalog.districtsByNameKey.get(normalizeLocationKey(districtName)) ?? [];
+        const [candidate] = candidates;
+        if (candidates.length === 1 && candidate) {
+          districtCode = candidate.code;
+          municipalityCode = candidate.municipality_code;
+        } else if (!allowCreate) {
+          throw new Error(`Distrito no encontrado o ambiguo: ${districtName}`);
+        } else {
+          throw new Error(`No se puede crear distrito sin municipio: ${districtName}`);
+        }
+      }
+
+      if (municipalityCode && !districtCode) {
+        const existing = catalog.districtsByMunicipalityAndKey.get(
+          districtMunicipalityKey(municipalityCode, districtName)
+        );
+        if (existing) {
+          districtCode = existing.code;
+        } else {
+          if (!allowCreate) {
+            throw new Error(`Distrito no encontrado: ${districtName}`);
+          }
+          districtCode = nextDistrictCode(catalog);
+          const created: DistrictRow = {
+            code: districtCode,
+            municipality_code: municipalityCode,
+            name: districtName,
+          };
+          registerDistrict(catalog, created);
+          newDistricts.push(created);
+        }
+      }
+    }
+
+    if (districtCode) {
+      const district = catalog.districtsByCode.get(districtCode);
+      if (!district) {
+        throw new Error(`Distrito no válido: ${districtCode}`);
+      }
+      if (municipalityCode && district.municipality_code !== municipalityCode) {
+        throw new Error('El distrito no pertenece al municipio seleccionado');
+      }
+      municipalityCode = municipalityCode ?? district.municipality_code;
+    }
+
+    if (municipalityCode && !catalog.municipalitiesByCode.has(municipalityCode)) {
+      throw new Error(`Municipio no válido: ${municipalityCode}`);
+    }
+
+    row.district_code = districtCode;
+    row.municipality_code = municipalityCode;
+  }
+
+  await insertMunicipalities(newMunicipalities);
+  await insertDistricts(newDistricts);
+}
+
 /**
  * POST /students/import - Importación masiva de alumnos con normalización
  */
-router.post('/import', requireAuth, async (req, res) => {
+router.post('/import', async (req, res) => {
   const rawRows = req.body?.rows;
   if (!Array.isArray(rawRows) || rawRows.length === 0) {
     return res.status(400).json({ error: 'rows must be a non-empty array' });
@@ -220,6 +508,8 @@ router.post('/import', requireAuth, async (req, res) => {
   }
 
   try {
+    await hydrateLocationCodes(validRows, true);
+
     const dniValues = validRows.map((r) => r.dni_nie);
     const expedienteValues = validRows.map((r) => r.expediente);
     const dniPlaceholders = dniValues.map(() => '?').join(',');
@@ -260,8 +550,8 @@ router.post('/import', requireAuth, async (req, res) => {
         birth_date,
         age,
         sex,
-        district,
-        municipality,
+        district_code,
+        municipality_code,
         phone,
         email,
         employment_status,
@@ -275,8 +565,8 @@ router.post('/import', requireAuth, async (req, res) => {
         birth_date = VALUES(birth_date),
         age = VALUES(age),
         sex = VALUES(sex),
-        district = VALUES(district),
-        municipality = VALUES(municipality),
+        district_code = VALUES(district_code),
+        municipality_code = VALUES(municipality_code),
         phone = VALUES(phone),
         email = VALUES(email),
         employment_status = VALUES(employment_status),
@@ -294,8 +584,8 @@ router.post('/import', requireAuth, async (req, res) => {
         r.birth_date,
         r.age,
         r.sex,
-        r.district,
-        r.municipality,
+        r.district_code,
+        r.municipality_code,
         r.phone,
         r.email,
         r.employment_status,
@@ -324,6 +614,8 @@ router.post('/', async (req, res) => {
   }
 
   try {
+    await hydrateLocationCodes([payload], true);
+
     const query = `
       INSERT INTO students
       (
@@ -335,8 +627,8 @@ router.post('/', async (req, res) => {
         birth_date,
         age,
         sex,
-        district,
-        municipality,
+        district_code,
+        municipality_code,
         phone,
         email,
         practices_start,
@@ -356,8 +648,8 @@ router.post('/', async (req, res) => {
       payload.birth_date,
       payload.age,
       payload.sex,
-      payload.district,
-      payload.municipality,
+      payload.district_code,
+      payload.municipality_code,
       payload.phone,
       payload.email,
       null,
@@ -389,6 +681,8 @@ router.put('/:id', async (req, res) => {
   }
 
   try {
+    await hydrateLocationCodes([payload], true);
+
     const query = `
       UPDATE students
       SET
@@ -400,8 +694,8 @@ router.put('/:id', async (req, res) => {
         birth_date = ?,
         age = ?,
         sex = ?,
-        district = ?,
-        municipality = ?,
+        district_code = ?,
+        municipality_code = ?,
         phone = ?,
         email = ?,
         employment_status = ?,
@@ -418,8 +712,8 @@ router.put('/:id', async (req, res) => {
       payload.birth_date,
       payload.age,
       payload.sex,
-      payload.district,
-      payload.municipality,
+      payload.district_code,
+      payload.municipality_code,
       payload.phone,
       payload.email,
       payload.employment_status,
@@ -438,7 +732,7 @@ router.put('/:id', async (req, res) => {
  */
 router.get('/', async (_req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM students ORDER BY expediente ASC, id DESC');
+    const [rows] = await pool.query(`${STUDENT_SELECT} ORDER BY s.expediente ASC, s.id DESC`);
     return res.json(rows);
   } catch (e) {
     return res.status(500).json({ error: 'Error al consultar alumnos', details: (e as Error).message });
@@ -450,7 +744,7 @@ router.get('/', async (_req, res) => {
  */
 router.get('/:id', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM students WHERE id = ?', [req.params.id]);
+    const [rows] = await pool.query(`${STUDENT_SELECT} WHERE s.id = ?`, [req.params.id]);
     if ((rows as any[]).length === 0) return res.status(404).json({ error: 'No encontrado' });
     return res.json((rows as any[])[0]);
   } catch (e) {
