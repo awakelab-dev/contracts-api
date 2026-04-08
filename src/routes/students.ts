@@ -643,6 +643,29 @@ router.get('/', async (_req, res) => {
   }
 });
 
+router.get('/:id/enrolled-courses', async (req, res) => {
+  const studentId = Number(req.params.id);
+  if (!Number.isFinite(studentId)) {
+    return res.status(400).json({ error: 'id must be a number' });
+  }
+
+  try {
+    const [studentRows] = await pool.query('SELECT dni_nie FROM students WHERE id = ?', [studentId]);
+    const student = (studentRows as Array<{ dni_nie: string }>)[0];
+    if (!student) {
+      return res.status(404).json({ error: 'No encontrado' });
+    }
+
+    const [rows] = await pool.query(
+      `\n        SELECT\n          cis.expediente,\n          cis.course_code,\n          cis.dni_nie,\n          ci.itinerary_name\n        FROM course_itinerary_students cis\n        INNER JOIN course_itineraries ci ON ci.course_code = cis.course_code\n        WHERE cis.dni_nie = ?\n        ORDER BY cis.course_code ASC, cis.expediente ASC\n      `,
+      [student.dni_nie]
+    );
+
+    return res.json(rows);
+  } catch (e) {
+    return res.status(500).json({ error: 'Error', details: (e as Error).message });
+  }
+});
 router.get('/:id', async (req, res) => {
   try {
     const [rows] = await pool.query(`${STUDENT_SELECT} WHERE s.id = ?`, [req.params.id]);
