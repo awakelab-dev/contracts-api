@@ -106,8 +106,16 @@ router.get('/summary', async (_req, res) => {
   try {
     const [sRes, eiRes, ceRes, mRes, vRes] = await Promise.all([
       pool.query("SELECT COUNT(*) AS total_students FROM students"),
-      pool.query("SELECT COUNT(*) AS employed_or_improved FROM students WHERE employment_status IN ('employed','improved')"),
-      pool.query("SELECT COUNT(*) AS currently_employed FROM students WHERE employment_status = 'employed'"),
+      pool.query(
+        `SELECT COUNT(DISTINCT student_id) AS employed_or_improved
+         FROM hiring_contracts`
+      ),
+      pool.query(
+        `SELECT COUNT(DISTINCT student_id) AS currently_employed
+         FROM hiring_contracts
+         WHERE start_date <= CURDATE()
+           AND (end_date IS NULL OR end_date >= CURDATE())`
+      ),
       pool.query(
         "SELECT COUNT(*) AS missing_cvs FROM students s LEFT JOIN documents d ON s.id = d.student_id AND d.type = 'cv' WHERE d.id IS NULL"
       ),
@@ -146,8 +154,6 @@ router.get('/reports', async (req, res) => {
         UNION ALL SELECT MIN(start_date) AS d FROM hiring_contracts
         UNION ALL SELECT MIN(end_date) AS d FROM hiring_contracts WHERE end_date IS NOT NULL
         UNION ALL SELECT MIN(COALESCE(end_date, start_date)) AS d FROM student_courses
-        UNION ALL SELECT MIN(practices_start) AS d FROM students WHERE practices_start IS NOT NULL
-        UNION ALL SELECT MIN(practices_end) AS d FROM students WHERE practices_end IS NOT NULL
       ) t`
     );
 
@@ -232,18 +238,22 @@ router.get('/reports', async (req, res) => {
           SELECT
             fc.student_id,
             fc.first_contract_start,
-            COALESCE(sc.course_end, s.practices_end, s.practices_start) AS itinerary_end
+            COALESCE(sc.course_end, pnl.last_pnl_end) AS itinerary_end
           FROM (
             SELECT student_id, MIN(start_date) AS first_contract_start
             FROM hiring_contracts
             GROUP BY student_id
           ) fc
-          JOIN students s ON s.id = fc.student_id
           LEFT JOIN (
             SELECT student_id, MAX(COALESCE(end_date, start_date)) AS course_end
             FROM student_courses
             GROUP BY student_id
           ) sc ON sc.student_id = fc.student_id
+          LEFT JOIN (
+            SELECT student_id, MAX(COALESCE(end_date, start_date)) AS last_pnl_end
+            FROM pnl
+            GROUP BY student_id
+          ) pnl ON pnl.student_id = fc.student_id
           WHERE fc.first_contract_start BETWEEN ? AND ?
         ) t
         WHERE itinerary_end IS NOT NULL

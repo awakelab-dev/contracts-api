@@ -299,13 +299,13 @@ router.get('/students', async (req, res) => {
          s.dni_nie,
          s.social_security_number,
          s.birth_date,
-         s.district,
+         d.name AS district,
          s.phone,
          s.email,
-         s.employment_status,
          MAX(m.score) AS score,
          COUNT(DISTINCT m.course_topic_id) AS matched_topics_count
        FROM students s
+       LEFT JOIN districts d ON d.code = s.district_code
        LEFT JOIN student_courses sc ON sc.student_id = s.id
        LEFT JOIN course_topics ct ON ct.title = TRIM(sc.title)
        LEFT JOIN vacancy_course_match m ON m.vacancy_id = ? AND m.course_topic_id = ct.id
