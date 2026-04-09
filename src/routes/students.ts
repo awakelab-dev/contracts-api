@@ -144,6 +144,60 @@ const normalizeBirthDate = (value: unknown) => {
   return parsed.toISOString().slice(0, 10);
 };
 
+const normalizeAsciiUpper = (value: unknown) =>
+  norm(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase();
+
+const normalizeOptionalDate = (value: unknown) => {
+  const cleaned = norm(value);
+  if (!cleaned) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) return cleaned;
+  const slashLike = cleaned.replace(/[.\-]/g, '/');
+  const m = slashLike.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (!m) return null;
+
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  let year = Number(m[3]);
+  if (!Number.isFinite(year)) return null;
+  if (year < 100) year += year >= 70 ? 1900 : 2000;
+
+  let month = a;
+  let day = b;
+  if (a > 12 && b <= 12) {
+    day = a;
+    month = b;
+  } else if (b > 12 && a <= 12) {
+    month = a;
+    day = b;
+  }
+  return toIsoDate(year, month, day);
+};
+
+function normalizeCourseStatusInput(value: unknown): 'APTO' | 'NO APTO' | 'INSERCION' {
+  const key = normalizeAsciiUpper(value).replace(/\s+/g, '');
+  if (!key || key === 'APTO') return 'APTO';
+  if (key === 'NOAPTO') return 'NO APTO';
+  if (key === 'INSERCION') return 'INSERCION';
+  throw new Error('course_status must be APTO, NO APTO or INSERCION');
+}
+
+function normalizeLeaveReasonInput(value: unknown) {
+  const key = normalizeAsciiUpper(value).replace(/\s+/g, '');
+  if (!key) return null;
+  if (['ABANDONO', 'INSERCION', 'EXPULSION', 'ENFERMEDAD', 'OTROS'].includes(key)) return key;
+  throw new Error('leave_reason inválido');
+}
+
+function normalizeLeaveNotificationInput(value: unknown) {
+  const key = normalizeAsciiUpper(value).replace(/\s+/g, '');
+  if (!key) return null;
+  if (['NOTIFICADA', 'FIRMADA', 'EXPULSION'].includes(key)) return key;
+  throw new Error('leave_notification inválido');
+}
+
 function splitFullName(full: string): { first_names: string; last_names: string } {
   const parts = norm(full).split(/\s+/).filter(Boolean);
   const first_names = parts.shift() || '';
@@ -657,11 +711,81 @@ router.get('/:id/enrolled-courses', async (req, res) => {
     }
 
     const [rows] = await pool.query(
-      `\n        SELECT\n          cis.expediente,\n          cis.course_code,\n          cis.dni_nie,\n          ci.itinerary_name\n        FROM course_itinerary_students cis\n        INNER JOIN course_itineraries ci ON ci.course_code = cis.course_code\n        WHERE cis.dni_nie = ?\n        ORDER BY cis.course_code ASC, cis.expediente ASC\n      `,
+      `
+        SELECT
+          cis.expediente,
+          cis.course_code,
+          cis.dni_nie,
+          cis.leave_date,
+          cis.leave_reason,
+          cis.leave_notification,
+          cis.course_status,
+          ci.itinerary_name,
+          ci.formation_end_date
+        FROM course_itinerary_students cis
+        INNER JOIN course_itineraries ci ON ci.course_code = cis.course_code
+        WHERE cis.dni_nie = ?
+        ORDER BY cis.course_code ASC, cis.expediente ASC
+      `,
       [student.dni_nie]
     );
 
     return res.json(rows);
+  } catch (e) {
+    return res.status(500).json({ error: 'Error', details: (e as Error).message });
+  }
+});
+
+router.put('/:id/enrolled-courses/:expediente', async (req, res) => {
+  const studentId = Number(req.params.id);
+  if (!Number.isFinite(studentId)) {
+    return res.status(400).json({ error: 'id must be a number' });
+  }
+
+  const expediente = normalizeAsciiUpper(req.params.expediente);
+  if (!expediente) {
+    return res.status(400).json({ error: 'expediente is required' });
+  }
+
+  let courseStatus: 'APTO' | 'NO APTO' | 'INSERCION';
+  let leaveDate: string | null = null;
+  let leaveReason: string | null = null;
+  let leaveNotification: string | null = null;
+
+  try {
+    courseStatus = normalizeCourseStatusInput(req.body?.course_status);
+    leaveDate = normalizeOptionalDate(req.body?.leave_date);
+    leaveReason = normalizeLeaveReasonInput(req.body?.leave_reason);
+    leaveNotification = normalizeLeaveNotificationInput(req.body?.leave_notification);
+  } catch (e) {
+    return res.status(400).json({ error: (e as Error).message });
+  }
+
+  if (courseStatus === 'APTO') {
+    leaveDate = null;
+    leaveReason = null;
+    leaveNotification = null;
+  }
+
+  try {
+    const [studentRows] = await pool.query('SELECT dni_nie FROM students WHERE id = ?', [studentId]);
+    const student = (studentRows as Array<{ dni_nie: string }>)[0];
+    if (!student) {
+      return res.status(404).json({ error: 'No encontrado' });
+    }
+
+    const [result] = await pool.query(
+      `UPDATE course_itinerary_students
+       SET course_status = ?, leave_date = ?, leave_reason = ?, leave_notification = ?
+       WHERE dni_nie = ? AND expediente = ?`,
+      [courseStatus, leaveDate, leaveReason, leaveNotification, student.dni_nie, expediente]
+    );
+
+    if ((result as any).affectedRows === 0) {
+      return res.status(404).json({ error: 'Itinerario no encontrado para este alumno' });
+    }
+
+    return res.json({ message: 'Itinerario actualizado' });
   } catch (e) {
     return res.status(500).json({ error: 'Error', details: (e as Error).message });
   }

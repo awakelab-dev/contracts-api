@@ -148,8 +148,8 @@ router.get('/reports', async (req, res) => {
 
     const [minRes] = await pool.query(
       `SELECT MIN(d) AS min_date FROM (
-        SELECT MIN(start_date) AS d FROM pnl
-        UNION ALL SELECT MIN(end_date) AS d FROM pnl WHERE end_date IS NOT NULL
+        SELECT MIN(start_date) AS d FROM practices
+        UNION ALL SELECT MIN(end_date) AS d FROM practices WHERE end_date IS NOT NULL
         UNION ALL SELECT MIN(interview_date) AS d FROM interviews
         UNION ALL SELECT MIN(start_date) AS d FROM hiring_contracts
         UNION ALL SELECT MIN(end_date) AS d FROM hiring_contracts WHERE end_date IS NOT NULL
@@ -199,15 +199,24 @@ router.get('/reports', async (req, res) => {
       periodEnd = p.end_date;
     }
 
-    const [studentsRes, pnlStartsRes, pnlEndsRes, interviewsRes, contractsRes, sixMonthsRes, ttbRes] = await Promise.all([
+    const [studentsRes, practicesStartsRes, practicesEndsRes, interviewsRes, contractsRes, sixMonthsRes, ttbRes] = await Promise.all([
       pool.query("SELECT COUNT(*) AS total FROM students"),
 
       pool.query(
-        "SELECT COUNT(DISTINCT student_id) AS cnt FROM pnl WHERE start_date BETWEEN ? AND ?",
+        `SELECT COUNT(DISTINCT s.id) AS cnt
+         FROM practices p
+         INNER JOIN course_itinerary_students cis ON cis.expediente = p.expediente
+         INNER JOIN students s ON s.dni_nie = cis.dni_nie
+         WHERE p.start_date BETWEEN ? AND ?`,
         [periodStart, periodEnd]
       ),
       pool.query(
-        "SELECT COUNT(DISTINCT student_id) AS cnt FROM pnl WHERE end_date IS NOT NULL AND end_date BETWEEN ? AND ?",
+        `SELECT COUNT(DISTINCT s.id) AS cnt
+         FROM practices p
+         INNER JOIN course_itinerary_students cis ON cis.expediente = p.expediente
+         INNER JOIN students s ON s.dni_nie = cis.dni_nie
+         WHERE p.end_date IS NOT NULL
+           AND p.end_date BETWEEN ? AND ?`,
         [periodStart, periodEnd]
       ),
 
@@ -238,7 +247,7 @@ router.get('/reports', async (req, res) => {
           SELECT
             fc.student_id,
             fc.first_contract_start,
-            COALESCE(sc.course_end, pnl.last_pnl_end) AS itinerary_end
+            COALESCE(sc.course_end, pr.last_practice_end) AS itinerary_end
           FROM (
             SELECT student_id, MIN(start_date) AS first_contract_start
             FROM hiring_contracts
@@ -250,10 +259,14 @@ router.get('/reports', async (req, res) => {
             GROUP BY student_id
           ) sc ON sc.student_id = fc.student_id
           LEFT JOIN (
-            SELECT student_id, MAX(COALESCE(end_date, start_date)) AS last_pnl_end
-            FROM pnl
-            GROUP BY student_id
-          ) pnl ON pnl.student_id = fc.student_id
+            SELECT
+              s.id AS student_id,
+              MAX(COALESCE(p.end_date, p.start_date)) AS last_practice_end
+            FROM practices p
+            INNER JOIN course_itinerary_students cis ON cis.expediente = p.expediente
+            INNER JOIN students s ON s.dni_nie = cis.dni_nie
+            GROUP BY s.id
+          ) pr ON pr.student_id = fc.student_id
           WHERE fc.first_contract_start BETWEEN ? AND ?
         ) t
         WHERE itinerary_end IS NOT NULL
@@ -263,9 +276,8 @@ router.get('/reports', async (req, res) => {
     ]);
 
     const totalStudents = asNumber((studentsRes[0] as any)[0]?.total);
-
-    const alumnosAccedenPracticas = asNumber((pnlStartsRes[0] as any)[0]?.cnt);
-    const alumnosFinalizanPNL = asNumber((pnlEndsRes[0] as any)[0]?.cnt);
+    const alumnosAccedenPracticas = asNumber((practicesStartsRes[0] as any)[0]?.cnt);
+    const alumnosFinalizanPracticas = asNumber((practicesEndsRes[0] as any)[0]?.cnt);
     const alumnosEntrevistas = asNumber((interviewsRes[0] as any)[0]?.cnt);
     const alumnosIncorporados = asNumber((contractsRes[0] as any)[0]?.cnt);
     const alumnosMas6Meses = asNumber((sixMonthsRes[0] as any)[0]?.cnt);
@@ -295,7 +307,7 @@ router.get('/reports', async (req, res) => {
         insercionLaboral,
         porcentajeEmpleoAntes3Meses,
         tiempoPromedioBusqueda,
-        alumnosFinalizanPNL,
+        alumnosFinalizanPracticas,
       },
     });
   } catch (e) {
