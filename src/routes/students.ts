@@ -721,7 +721,11 @@ router.get('/:id/enrolled-courses', async (req, res) => {
           cis.leave_notification,
           cis.course_status,
           ci.itinerary_name,
-          ci.formation_end_date
+          ci.formation_start_date,
+          ci.formation_end_date,
+          ci.formation_schedule,
+          ci.company,
+          ci.teacher
         FROM course_itinerary_students cis
         INNER JOIN course_itineraries ci ON ci.course_code = cis.course_code
         WHERE cis.dni_nie = ?
