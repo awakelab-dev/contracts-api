@@ -69,9 +69,17 @@ async function resolveCompany(company_id: any, company_name: any): Promise<{ com
   const [rows] = await pool.query(
     `SELECT id, name
      FROM companies
-     WHERE TRIM(name) COLLATE utf8mb4_unicode_ci = TRIM(?) COLLATE utf8mb4_unicode_ci
+     WHERE
+       TRIM(name) COLLATE utf8mb4_unicode_ci = TRIM(?) COLLATE utf8mb4_unicode_ci
+       OR TRIM(COALESCE(fiscal_name, '')) COLLATE utf8mb4_unicode_ci = TRIM(?) COLLATE utf8mb4_unicode_ci
+     ORDER BY
+       CASE
+         WHEN TRIM(name) COLLATE utf8mb4_unicode_ci = TRIM(?) COLLATE utf8mb4_unicode_ci THEN 0
+         ELSE 1
+       END,
+       id ASC
      LIMIT 1`,
-    [name]
+    [name, name, name]
   );
   const company = (rows as any[])[0];
   if (!company) return { companyId: null, companyName: name };

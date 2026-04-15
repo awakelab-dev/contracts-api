@@ -6,6 +6,29 @@ const router = Router();
 
 router.use(requireAuth);
 
+const norm = (value: unknown) => (value ?? '').toString().trim();
+
+const normalizeSectorName = (value: unknown) => {
+  const cleaned = norm(value).replace(/\s+/g, ' ').toUpperCase();
+  return cleaned ? cleaned : null;
+};
+
+async function resolveSectorId(sectorNameRaw: unknown): Promise<number | null> {
+  const sectorName = normalizeSectorName(sectorNameRaw);
+  if (!sectorName) return null;
+
+  const [result] = await pool.query(
+    `INSERT INTO sectors (sector_name)
+     VALUES (?)
+     ON DUPLICATE KEY UPDATE
+       id = LAST_INSERT_ID(id),
+       sector_name = VALUES(sector_name)`,
+    [sectorName]
+  );
+
+  return Number((result as any).insertId || 0) || null;
+}
+
 /**
  * GET / - Listar todas las vacantes con el nombre de la empresa
  */
@@ -57,28 +80,37 @@ router.post('/', async (req, res) => {
 /**
  * POST /vacancies/import - importación masiva de vacantes (crea empresa si no existe)
  */
-router.post('/import', requireAuth, async (req, res) => {
+router.post('/import', async (req, res) => {
   const rows = (req.body?.rows || []) as Array<{ title?: string; company_name?: string; sector?: string; location?: string }>;
   if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ error: 'rows must be a non-empty array' });
   let inserted = 0;
   let total = rows.length;
   try {
     for (const r of rows) {
-      const title = (r.title || '').trim();
-      const companyName = (r.company_name || '').trim();
+      const title = norm(r.title);
+      const companyName = norm(r.company_name);
+      const sectorId = await resolveSectorId(r.sector);
       if (!title || !companyName) continue; // skip inválidas
       // buscar o crear empresa
       const [cRows] = await pool.query('SELECT id FROM companies WHERE name = ? LIMIT 1', [companyName]);
       let companyId = (cRows as any[])[0]?.id as number | undefined;
       if (!companyId) {
-        const [ins] = await pool.query('INSERT IGNORE INTO companies (name, sector, notes) VALUES (?, ?, ?)', [companyName, r.sector || null, r.location || null]);
+        const [ins] = await pool.query(
+          'INSERT IGNORE INTO companies (name, fiscal_name, sector_id, notes) VALUES (?, ?, ?, ?)',
+          [companyName, companyName, sectorId, norm(r.location) || null]
+        );
         companyId = (ins as any).insertId || (await (async () => {
           const [c2] = await pool.query('SELECT id FROM companies WHERE name = ? LIMIT 1', [companyName]);
           return (c2 as any[])[0]?.id;
         })());
+      } else if (sectorId) {
+        await pool.query('UPDATE companies SET sector_id = COALESCE(sector_id, ?) WHERE id = ?', [sectorId, companyId]);
       }
       if (!companyId) continue; // si no se pudo resolver empresa, saltamos
-      const [vres] = await pool.query('INSERT INTO vacancies (company_id, title, sector, status) VALUES (?, ?, ?, ?)', [companyId, title, (r.sector || null), 'open']);
+      const [vres] = await pool.query(
+        'INSERT INTO vacancies (company_id, title, sector, status) VALUES (?, ?, ?, ?)',
+        [companyId, title, normalizeSectorName(r.sector), 'open']
+      );
       if ((vres as any).affectedRows) inserted += 1;
     }
     const skipped = total - inserted;
