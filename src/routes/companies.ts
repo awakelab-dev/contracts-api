@@ -19,6 +19,18 @@ async function hasColumn(tableName: string, columnName: string): Promise<boolean
   return Number((rows as Array<{ c: number }>)[0]?.c || 0) > 0;
 }
 
+async function dropIndexIfExists(tableName: string, indexName: string) {
+  const exists = await hasIndex(tableName, indexName);
+  if (!exists) return;
+  await pool.query(`ALTER TABLE ${tableName} DROP INDEX ${indexName}`);
+}
+
+async function dropColumnIfExists(tableName: string, columnName: string) {
+  const exists = await hasColumn(tableName, columnName);
+  if (!exists) return;
+  await pool.query(`ALTER TABLE ${tableName} DROP COLUMN ${columnName}`);
+}
+
 async function ensureColumn(tableName: string, columnName: string, definitionSql: string) {
   const exists = await hasColumn(tableName, columnName);
   if (exists) return;
@@ -68,7 +80,6 @@ async function ensureCompaniesSchema() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS companies (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
-        nif VARCHAR(50) NULL,
         cif VARCHAR(50) NULL,
         name VARCHAR(190) NOT NULL,
         fiscal_name VARCHAR(255) NULL,
@@ -84,11 +95,30 @@ async function ensureCompaniesSchema() {
         agreement_code VARCHAR(64) NULL,
         codigo_convenio VARCHAR(64) NULL,
         required_position VARCHAR(255) NULL,
-        notes TEXT NULL
+        has_complex_practice_centers TINYINT(1) NOT NULL DEFAULT 0,
+        notes TEXT NULL,
+        UNIQUE KEY uq_company_fiscal_name (fiscal_name)
       ) ENGINE=InnoDB
     `);
 
-    await ensureColumn('companies', 'cif', 'VARCHAR(50) NULL AFTER nif');
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS company_practice_centers (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        company_id BIGINT NOT NULL,
+        address VARCHAR(255) NULL,
+        sector VARCHAR(120) NULL,
+        center VARCHAR(190) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_company_practice_centers_company_id (company_id),
+        CONSTRAINT fk_company_practice_centers_company
+          FOREIGN KEY (company_id) REFERENCES companies(id)
+          ON UPDATE CASCADE
+          ON DELETE CASCADE
+      ) ENGINE=InnoDB
+    `);
+
+    await ensureColumn('companies', 'cif', 'VARCHAR(50) NULL AFTER id');
     await ensureColumn('companies', 'fiscal_name', 'VARCHAR(255) NULL AFTER name');
     await ensureColumn('companies', 'sector_id', 'BIGINT NULL AFTER fiscal_name');
     await ensureColumn('companies', 'company_email', 'VARCHAR(190) NULL AFTER sector_id');
@@ -101,17 +131,38 @@ async function ensureCompaniesSchema() {
     await ensureColumn('companies', 'agreement_date', 'DATE NULL AFTER agreement_signed');
     await ensureColumn('companies', 'agreement_code', 'VARCHAR(64) NULL AFTER agreement_date');
     await ensureColumn('companies', 'codigo_convenio', 'VARCHAR(64) NULL AFTER agreement_code');
-    await ensureColumn('companies', 'required_position', 'VARCHAR(255) NULL AFTER agreement_code');
-    await ensureColumn('companies', 'notes', 'TEXT NULL AFTER required_position');
+    await ensureColumn('companies', 'required_position', 'VARCHAR(255) NULL AFTER codigo_convenio');
+    await ensureColumn('companies', 'has_complex_practice_centers', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER required_position');
+    await ensureColumn('companies', 'notes', 'TEXT NULL AFTER has_complex_practice_centers');
 
-    const hasCompanyNameUq = await hasIndex('companies', 'uq_company_name');
-    if (!hasCompanyNameUq) {
-      await pool.query('ALTER TABLE companies ADD UNIQUE INDEX uq_company_name (name)');
+    const hasLegacyNif = await hasColumn('companies', 'nif');
+    if (hasLegacyNif) {
+      await pool.query(`
+        UPDATE companies
+        SET cif = nif
+        WHERE (cif IS NULL OR TRIM(cif) = '')
+          AND nif IS NOT NULL
+          AND TRIM(nif) <> ''
+      `);
     }
 
-    const hasCompanyNifUq = await hasIndex('companies', 'uq_company_nif');
-    if (!hasCompanyNifUq) {
-      await pool.query('ALTER TABLE companies ADD UNIQUE INDEX uq_company_nif (nif)');
+    await dropIndexIfExists('companies', 'uq_company_name');
+    await dropIndexIfExists('companies', 'uq_company_nif');
+    await dropColumnIfExists('companies', 'nif');
+
+    const hasFiscalNameUq = await hasIndex('companies', 'uq_company_fiscal_name');
+    if (!hasFiscalNameUq) {
+      const [duplicateFiscalRows] = await pool.query(
+        `SELECT TRIM(fiscal_name) AS fiscal_name, COUNT(*) AS c
+         FROM companies
+         WHERE fiscal_name IS NOT NULL AND TRIM(fiscal_name) <> ''
+         GROUP BY TRIM(fiscal_name)
+         HAVING COUNT(*) > 1
+         LIMIT 1`
+      );
+      if ((duplicateFiscalRows as Array<{ fiscal_name: string; c: number }>).length === 0) {
+        await pool.query('ALTER TABLE companies ADD UNIQUE INDEX uq_company_fiscal_name (fiscal_name)');
+      }
     }
 
     const idxExists = await hasIndex('companies', 'idx_companies_sector_id');
@@ -137,15 +188,10 @@ async function ensureCompaniesSchema() {
           AND c.sector IS NOT NULL
           AND TRIM(c.sector) <> ''
       `);
+
+      await dropColumnIfExists('companies', 'sector');
     }
 
-    await pool.query(`
-      UPDATE companies
-      SET cif = nif
-      WHERE (cif IS NULL OR TRIM(cif) = '')
-        AND nif IS NOT NULL
-        AND TRIM(nif) <> ''
-    `);
 
     await pool.query(`
       UPDATE companies
@@ -190,8 +236,7 @@ router.use(async (req, res, next) => {
 const COMPANY_SELECT = `
   SELECT
     c.id,
-    COALESCE(c.cif, c.nif) AS nif,
-    COALESCE(c.cif, c.nif) AS cif,
+    c.cif,
     c.name,
     c.fiscal_name,
     c.sector_id,
@@ -208,6 +253,7 @@ const COMPANY_SELECT = `
     COALESCE(c.codigo_convenio, c.agreement_code) AS agreement_code,
     COALESCE(c.codigo_convenio, c.agreement_code) AS codigo_convenio,
     c.required_position,
+    c.has_complex_practice_centers,
     c.notes
   FROM companies c
   LEFT JOIN sectors s ON s.id = c.sector_id
@@ -292,12 +338,26 @@ const toPositiveInt = (value: unknown) => {
   return Math.trunc(parsed);
 };
 
+const toBool = (value: unknown) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  const cleaned = norm(value).toLowerCase();
+  if (!cleaned) return false;
+  return ['1', 'true', 'si', 'sí', 'yes'].includes(cleaned);
+};
+
 const pick = (obj: Record<string, unknown>, keys: string[]) => {
   for (const key of keys) {
     if (obj[key] !== undefined) return obj[key];
   }
   return undefined;
 };
+
+const isDuplicateEntryError = (error: unknown) =>
+  typeof error === 'object' &&
+  error !== null &&
+  'code' in error &&
+  (error as { code?: string }).code === 'ER_DUP_ENTRY';
 
 async function resolveSectorId(inputSectorId: unknown, inputSectorName: unknown): Promise<number | null> {
   const explicitId = toPositiveInt(inputSectorId);
@@ -320,6 +380,19 @@ async function resolveSectorId(inputSectorId: unknown, inputSectorName: unknown)
   );
 
   return Number((result as ResultSetHeader).insertId || 0) || null;
+}
+
+async function getCompanyMeta(companyId: number): Promise<{ id: number; hasComplexPracticeCenters: boolean } | null> {
+  const [rows] = await pool.query(
+    'SELECT id, has_complex_practice_centers FROM companies WHERE id = ? LIMIT 1',
+    [companyId]
+  );
+  const company = (rows as any[])[0];
+  if (!company?.id) return null;
+  return {
+    id: Number(company.id),
+    hasComplexPracticeCenters: Number(company.has_complex_practice_centers || 0) === 1,
+  };
 }
 
 /**
@@ -351,7 +424,6 @@ router.get('/sectors', async (_req, res) => {
  */
 router.post('/', async (req, res) => {
   const {
-    nif,
     cif,
     name,
     fiscal_name,
@@ -369,6 +441,7 @@ router.post('/', async (req, res) => {
     agreement_code,
     codigo_convenio,
     required_position,
+    has_complex_practice_centers,
     notes,
   } = req.body ?? {};
 
@@ -381,13 +454,13 @@ router.post('/', async (req, res) => {
     const resolvedSectorId = await resolveSectorId(sector_id, sector_name ?? sector);
     const resolvedCompanyEmail = extractEmail(company_email ?? contact_email);
     const resolvedContactEmail = extractEmail(contact_email ?? company_email);
-    const resolvedNif = toNull(cif ?? nif);
+    const resolvedCif = toNull(cif);
     const resolvedAgreementCode = toNull(codigo_convenio ?? agreement_code);
+    const hasComplexPracticeCenters = toBool(has_complex_practice_centers);
 
     const query = `
       INSERT INTO companies
       (
-        nif,
         cif,
         name,
         fiscal_name,
@@ -403,14 +476,14 @@ router.post('/', async (req, res) => {
         agreement_code,
         codigo_convenio,
         required_position,
+        has_complex_practice_centers,
         notes
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const [result] = await pool.query(query, [
-      resolvedNif,
-      resolvedNif,
+      resolvedCif,
       companyName,
       toNull(fiscal_name),
       resolvedSectorId,
@@ -425,11 +498,15 @@ router.post('/', async (req, res) => {
       resolvedAgreementCode,
       resolvedAgreementCode,
       toNull(required_position),
+      hasComplexPracticeCenters ? 1 : 0,
       toNull(notes),
     ]);
 
     res.status(201).json({ message: 'Empresa creada', id: (result as ResultSetHeader).insertId });
   } catch (e) {
+    if (isDuplicateEntryError(e)) {
+      return res.status(409).json({ error: 'El nombre fiscal debe ser único' });
+    }
     res.status(500).json({ error: 'Error al crear empresa', details: (e as Error).message });
   }
 });
@@ -463,7 +540,7 @@ router.post('/import', async (req, res) => {
         skipped += 1;
         continue;
       }
-      const resolvedNif = toNull(pick(row, ['nif', 'cif', 'CIF']));
+      const resolvedCif = toNull(pick(row, ['cif', 'CIF']));
       const resolvedAgreementCode = toNull(
         pick(row, ['agreement_code', 'codigo_convenio', 'CODIGO CONVENIO', 'CODIGO CONVENIO ', 'CODIGO_CONVENIO'])
       );
@@ -509,23 +586,34 @@ router.post('/import', async (req, res) => {
         existingId = rowById?.id ? Number(rowById.id) : null;
       }
 
-      if (!existingId) {
-        const [existingByNameRows] = await pool.query(
+      if (!existingId && fiscalName) {
+        const [existingByFiscalRows] = await pool.query(
           `SELECT id
            FROM companies
-           WHERE TRIM(name) COLLATE utf8mb4_unicode_ci = TRIM(?) COLLATE utf8mb4_unicode_ci
+           WHERE TRIM(fiscal_name) COLLATE utf8mb4_unicode_ci = TRIM(?) COLLATE utf8mb4_unicode_ci
            LIMIT 1`,
-          [companyName]
+          [fiscalName]
         );
-        const rowByName = (existingByNameRows as any[])[0];
-        existingId = rowByName?.id ? Number(rowByName.id) : null;
+        const rowByFiscal = (existingByFiscalRows as any[])[0];
+        existingId = rowByFiscal?.id ? Number(rowByFiscal.id) : null;
+      }
+
+      if (!existingId && resolvedCif) {
+        const [existingByCifRows] = await pool.query(
+          `SELECT id
+           FROM companies
+           WHERE TRIM(cif) COLLATE utf8mb4_unicode_ci = TRIM(?) COLLATE utf8mb4_unicode_ci
+           LIMIT 1`,
+          [resolvedCif]
+        );
+        const rowByCif = (existingByCifRows as any[])[0];
+        existingId = rowByCif?.id ? Number(rowByCif.id) : null;
       }
 
       if (existingId) {
         await pool.query(
           `UPDATE companies
            SET
-             nif = ?,
              cif = ?,
              name = ?,
              fiscal_name = ?,
@@ -544,8 +632,7 @@ router.post('/import', async (req, res) => {
              notes = ?
            WHERE id = ?`,
           [
-            resolvedNif,
-            resolvedNif,
+            resolvedCif,
             companyName,
             fiscalName,
             resolvedSectorId,
@@ -571,12 +658,11 @@ router.post('/import', async (req, res) => {
       if (companyIdFromCsv) {
         await pool.query(
           `INSERT INTO companies
-           (id, nif, cif, name, fiscal_name, sector_id, company_email, company_phone, contact_name, contact_email, contact_phone, contact_date, agreement_signed, agreement_date, agreement_code, codigo_convenio, required_position, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, cif, name, fiscal_name, sector_id, company_email, company_phone, contact_name, contact_email, contact_phone, contact_date, agreement_signed, agreement_date, agreement_code, codigo_convenio, required_position, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             companyIdFromCsv,
-            resolvedNif,
-            resolvedNif,
+            resolvedCif,
             companyName,
             fiscalName,
             resolvedSectorId,
@@ -597,11 +683,10 @@ router.post('/import', async (req, res) => {
       } else {
         await pool.query(
           `INSERT INTO companies
-           (nif, cif, name, fiscal_name, sector_id, company_email, company_phone, contact_name, contact_email, contact_phone, contact_date, agreement_signed, agreement_date, agreement_code, codigo_convenio, required_position, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (cif, name, fiscal_name, sector_id, company_email, company_phone, contact_name, contact_email, contact_phone, contact_date, agreement_signed, agreement_date, agreement_code, codigo_convenio, required_position, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
-            resolvedNif,
-            resolvedNif,
+            resolvedCif,
             companyName,
             fiscalName,
             resolvedSectorId,
@@ -626,6 +711,9 @@ router.post('/import', async (req, res) => {
 
     return res.json({ inserted, updated, skipped, total: rows.length });
   } catch (e) {
+    if (isDuplicateEntryError(e)) {
+      return res.status(409).json({ error: 'El nombre fiscal debe ser único' });
+    }
     return res.status(500).json({ error: 'Error en importación', details: (e as Error).message });
   }
 });
@@ -640,7 +728,6 @@ router.put('/:id', async (req, res) => {
   }
 
   const {
-    nif,
     cif,
     name,
     fiscal_name,
@@ -658,6 +745,7 @@ router.put('/:id', async (req, res) => {
     agreement_code,
     codigo_convenio,
     required_position,
+    has_complex_practice_centers,
     notes,
   } = req.body ?? {};
 
@@ -670,13 +758,13 @@ router.put('/:id', async (req, res) => {
     const resolvedSectorId = await resolveSectorId(sector_id, sector_name ?? sector);
     const resolvedCompanyEmail = extractEmail(company_email ?? contact_email);
     const resolvedContactEmail = extractEmail(contact_email ?? company_email);
-    const resolvedNif = toNull(cif ?? nif);
+    const resolvedCif = toNull(cif);
     const resolvedAgreementCode = toNull(codigo_convenio ?? agreement_code);
+    const hasComplexPracticeCenters = toBool(has_complex_practice_centers);
 
     const query = `
       UPDATE companies
       SET
-        nif = ?,
         cif = ?,
         name = ?,
         fiscal_name = ?,
@@ -692,13 +780,13 @@ router.put('/:id', async (req, res) => {
         agreement_code = ?,
         codigo_convenio = ?,
         required_position = ?,
+        has_complex_practice_centers = ?,
         notes = ?
       WHERE id = ?
     `;
 
     await pool.query(query, [
-      resolvedNif,
-      resolvedNif,
+      resolvedCif,
       companyName,
       toNull(fiscal_name),
       resolvedSectorId,
@@ -713,13 +801,156 @@ router.put('/:id', async (req, res) => {
       resolvedAgreementCode,
       resolvedAgreementCode,
       toNull(required_position),
+      hasComplexPracticeCenters ? 1 : 0,
       toNull(notes),
       companyId,
     ]);
 
     res.json({ message: 'Empresa actualizada con éxito' });
   } catch (e) {
+    if (isDuplicateEntryError(e)) {
+      return res.status(409).json({ error: 'El nombre fiscal debe ser único' });
+    }
     res.status(500).json({ error: 'Error al actualizar empresa', details: (e as Error).message });
+  }
+});
+
+/**
+ * GET /:id/practice-centers - direcciones/centros de prácticas por empresa
+ */
+router.get('/:id/practice-centers', async (req, res) => {
+  const companyId = toPositiveInt(req.params.id);
+  if (!companyId) {
+    return res.status(400).json({ error: 'id inválido' });
+  }
+  try {
+    const company = await getCompanyMeta(companyId);
+    if (!company) return res.status(404).json({ error: 'Empresa no encontrada' });
+    const [rows] = await pool.query(
+      `SELECT id, company_id, address, sector, center, created_at, updated_at
+       FROM company_practice_centers
+       WHERE company_id = ?
+       ORDER BY id ASC`,
+      [companyId]
+    );
+    return res.json(rows);
+  } catch (e) {
+    return res.status(500).json({ error: 'Error al consultar direcciones de prácticas', details: (e as Error).message });
+  }
+});
+
+/**
+ * POST /:id/practice-centers - crear dirección/centro de prácticas
+ */
+router.post('/:id/practice-centers', async (req, res) => {
+  const companyId = toPositiveInt(req.params.id);
+  if (!companyId) {
+    return res.status(400).json({ error: 'id inválido' });
+  }
+  try {
+    const company = await getCompanyMeta(companyId);
+    if (!company) return res.status(404).json({ error: 'Empresa no encontrada' });
+
+    const address = toNull(req.body?.address);
+    const sectorValue = toNull(req.body?.sector);
+    const centerValue = toNull(req.body?.center);
+
+    if (company.hasComplexPracticeCenters) {
+      if (!sectorValue || !centerValue || !address) {
+        return res.status(400).json({ error: 'Sector, Centro y Dirección son obligatorios para estructura compleja' });
+      }
+    } else if (!address) {
+      return res.status(400).json({ error: 'La dirección es obligatoria' });
+    }
+
+    const [result] = await pool.query<ResultSetHeader>(
+      `INSERT INTO company_practice_centers (company_id, address, sector, center)
+       VALUES (?, ?, ?, ?)`,
+      [
+        companyId,
+        address,
+        sectorValue,
+        centerValue,
+      ]
+    );
+
+    return res.status(201).json({ message: 'Dirección de prácticas creada', id: (result as ResultSetHeader).insertId });
+  } catch (e) {
+    return res.status(500).json({ error: 'Error al crear dirección de prácticas', details: (e as Error).message });
+  }
+});
+
+/**
+ * PUT /:id/practice-centers/:centerId - actualizar dirección/centro de prácticas
+ */
+router.put('/:id/practice-centers/:centerId', async (req, res) => {
+  const companyId = toPositiveInt(req.params.id);
+  const practiceCenterId = toPositiveInt(req.params.centerId);
+  if (!companyId || !practiceCenterId) {
+    return res.status(400).json({ error: 'id inválido' });
+  }
+  try {
+    const company = await getCompanyMeta(companyId);
+    if (!company) return res.status(404).json({ error: 'Empresa no encontrada' });
+
+    const address = toNull(req.body?.address);
+    const sectorValue = toNull(req.body?.sector);
+    const centerValue = toNull(req.body?.center);
+
+    if (company.hasComplexPracticeCenters) {
+      if (!sectorValue || !centerValue || !address) {
+        return res.status(400).json({ error: 'Sector, Centro y Dirección son obligatorios para estructura compleja' });
+      }
+    } else if (!address) {
+      return res.status(400).json({ error: 'La dirección es obligatoria' });
+    }
+
+    const [result] = await pool.query<ResultSetHeader>(
+      `UPDATE company_practice_centers
+       SET
+         address = ?,
+         sector = ?,
+         center = ?
+       WHERE id = ? AND company_id = ?`,
+      [
+        address,
+        sectorValue,
+        centerValue,
+        practiceCenterId,
+        companyId,
+      ]
+    );
+
+    if ((result as ResultSetHeader).affectedRows === 0) {
+      return res.status(404).json({ error: 'Dirección de prácticas no encontrada' });
+    }
+
+    return res.json({ message: 'Dirección de prácticas actualizada' });
+  } catch (e) {
+    return res.status(500).json({ error: 'Error al actualizar dirección de prácticas', details: (e as Error).message });
+  }
+});
+
+/**
+ * DELETE /:id/practice-centers/:centerId - eliminar dirección/centro de prácticas
+ */
+router.delete('/:id/practice-centers/:centerId', async (req, res) => {
+  const companyId = toPositiveInt(req.params.id);
+  const practiceCenterId = toPositiveInt(req.params.centerId);
+  if (!companyId || !practiceCenterId) {
+    return res.status(400).json({ error: 'id inválido' });
+  }
+  try {
+    const [result] = await pool.query<ResultSetHeader>(
+      'DELETE FROM company_practice_centers WHERE id = ? AND company_id = ?',
+      [practiceCenterId, companyId]
+    );
+    if ((result as ResultSetHeader).affectedRows === 0) {
+      return res.status(404).json({ error: 'Dirección de prácticas no encontrada' });
+    }
+    return res.json({ message: 'Dirección de prácticas eliminada' });
+  } catch (e) {
+    return res.status(500).json({ error: 'Error al eliminar dirección de prácticas', details: (e as Error).message });
   }
 });
 
