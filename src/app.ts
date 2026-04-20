@@ -16,6 +16,7 @@ import hiringContracts from "./routes/hiringContracts.js";
 import liquidations from "./routes/liquidations.js";
 import stats from "./routes/stats.js";
 import matching from "./routes/matching.js";
+import transactionHistory from "./routes/transactionHistory.js";
 import { env } from "./config/env.js";
 import { requireAuth } from "./middleware/auth.js";
 
@@ -53,6 +54,7 @@ apiRouter.use("/hiring-contracts", hiringContracts);
 apiRouter.use("/liquidations", liquidations);
 apiRouter.use("/stats", stats);
 apiRouter.use("/matching", matching);
+apiRouter.use("/transaction-history", transactionHistory);
 
 // Support both "/..." and "/api/..." prefixes (local vs deployed setups).
 app.use("/api", apiRouter);
