@@ -159,4 +159,70 @@ router.post('/', async (req, res) => {
   }
 });
 
+/**
+ * PUT /transaction-history/:companyId/:transactionId
+ */
+router.put('/:companyId/:transactionId', async (req, res) => {
+  const companyId = toPositiveInt(req.params.companyId);
+  const transactionId = toPositiveInt(req.params.transactionId);
+  const description = norm(req.body?.description);
+
+  if (!companyId || !transactionId) {
+    return res.status(400).json({ error: 'id inválido' });
+  }
+  if (!description) {
+    return res.status(400).json({ error: 'description es obligatoria' });
+  }
+
+  try {
+    const [result] = await pool.query<ResultSetHeader>(
+      `UPDATE transaction_history
+       SET description = ?
+       WHERE id = ? AND company_id = ?`,
+      [description, transactionId, companyId]
+    );
+
+    if ((result as ResultSetHeader).affectedRows === 0) {
+      return res.status(404).json({ error: 'Transacción no encontrada' });
+    }
+
+    return res.json({ message: 'Transacción actualizada' });
+  } catch (e) {
+    return res.status(500).json({
+      error: 'Error al actualizar transacción',
+      details: (e as Error).message,
+    });
+  }
+});
+
+/**
+ * DELETE /transaction-history/:companyId/:transactionId
+ */
+router.delete('/:companyId/:transactionId', async (req, res) => {
+  const companyId = toPositiveInt(req.params.companyId);
+  const transactionId = toPositiveInt(req.params.transactionId);
+
+  if (!companyId || !transactionId) {
+    return res.status(400).json({ error: 'id inválido' });
+  }
+
+  try {
+    const [result] = await pool.query<ResultSetHeader>(
+      'DELETE FROM transaction_history WHERE id = ? AND company_id = ?',
+      [transactionId, companyId]
+    );
+
+    if ((result as ResultSetHeader).affectedRows === 0) {
+      return res.status(404).json({ error: 'Transacción no encontrada' });
+    }
+
+    return res.json({ message: 'Transacción eliminada' });
+  } catch (e) {
+    return res.status(500).json({
+      error: 'Error al eliminar transacción',
+      details: (e as Error).message,
+    });
+  }
+});
+
 export default router;
