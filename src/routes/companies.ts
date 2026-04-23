@@ -310,8 +310,16 @@ const normalizeDate = (value: unknown) => {
 };
 
 const normalizeAgreementSigned = (value: unknown) => {
+  if (typeof value === 'boolean') {
+    return value ? 'SI' : 'NO';
+  }
+  if (typeof value === 'number') {
+    return value !== 0 ? 'SI' : 'NO';
+  }
   const cleaned = norm(value).toUpperCase();
   if (!cleaned) return null;
+  if (['TRUE', 'YES', '1'].includes(cleaned)) return 'SI';
+  if (['FALSE', '0'].includes(cleaned)) return 'NO';
   if (cleaned.startsWith('SI') || cleaned === 'SÍ') return 'SI';
   if (cleaned.startsWith('NO')) return 'NO';
   return null;

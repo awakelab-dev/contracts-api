@@ -3,6 +3,64 @@ import { pool } from '../db/pool.js';
 
 const router = Router();
 type SexValue = 'mujer' | 'hombre' | 'other' | 'unknown';
+type TicValue = 'SI' | 'NO';
+type StatusLaboralValue = 'Buscando empleo' | 'Buscando mejorar empleo' | 'Sin buscar empleo' | null;
+
+let ensureStudentsSchemaPromise: Promise<void> | null = null;
+
+async function hasColumn(tableName: string, columnName: string): Promise<boolean> {
+  const [rows] = await pool.query(
+    `SELECT COUNT(*) AS c
+     FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = ?
+       AND column_name = ?`,
+    [tableName, columnName]
+  );
+  return Number((rows as Array<{ c: number }>)[0]?.c || 0) > 0;
+}
+
+async function ensureColumn(tableName: string, columnName: string, definitionSql: string) {
+  const exists = await hasColumn(tableName, columnName);
+  if (exists) return;
+  await pool.query(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definitionSql}`);
+}
+
+async function ensureStudentsSchema() {
+  if (ensureStudentsSchemaPromise) {
+    await ensureStudentsSchemaPromise;
+    return;
+  }
+
+  ensureStudentsSchemaPromise = (async () => {
+    await ensureColumn('students', 'tic', "VARCHAR(3) NOT NULL DEFAULT 'NO' AFTER email");
+    await ensureColumn('students', 'status_laboral', 'VARCHAR(40) NULL AFTER tic');
+    await ensureColumn(
+      'course_itinerary_students',
+      'effective_start_date',
+      'DATE NULL AFTER dni_nie'
+    );
+  })();
+
+  try {
+    await ensureStudentsSchemaPromise;
+  } catch (error) {
+    ensureStudentsSchemaPromise = null;
+    throw error;
+  }
+}
+
+router.use(async (req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
+  try {
+    await ensureStudentsSchema();
+    return next();
+  } catch (e) {
+    return res.status(500).json({ error: 'Error al preparar esquema de alumnos', details: (e as Error).message });
+  }
+});
 
 type StudentPayload = {
   first_names: string;
@@ -17,6 +75,8 @@ type StudentPayload = {
   municipality_name: string | null;
   phone: string | null;
   email: string | null;
+  tic: TicValue;
+  status_laboral: StatusLaboralValue;
   notes: string | null;
 };
 
@@ -56,6 +116,8 @@ const STUDENT_SELECT = `
     m.name AS municipality,
     s.phone,
     s.email,
+    COALESCE(s.tic, 'NO') AS tic,
+    s.status_laboral,
     s.notes
   FROM students s
   LEFT JOIN districts d ON d.code = s.district_code
@@ -95,6 +157,28 @@ const normalizeSex = (value: unknown): SexValue => {
   if (['hombre', 'male', 'm'].includes(cleaned)) return 'hombre';
   if (['other', 'otro', 'otra', 'no binario', 'no-binario', 'non-binary'].includes(cleaned)) return 'other';
   return 'unknown';
+};
+
+const normalizeTic = (value: unknown, fallback: TicValue = 'NO'): TicValue => {
+  const cleaned = norm(value).toLowerCase();
+  if (!cleaned) return fallback;
+  if (['si', 'sí', 's', '1', 'true', 'yes'].includes(cleaned)) return 'SI';
+  if (['no', 'n', '0', 'false'].includes(cleaned)) return 'NO';
+  return fallback;
+};
+
+const normalizeStatusLaboral = (value: unknown): StatusLaboralValue => {
+  const cleaned = norm(value);
+  if (!cleaned) return null;
+  const key = cleaned
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  if (key === 'buscando empleo') return 'Buscando empleo';
+  if (key === 'buscando mejorar empleo') return 'Buscando mejorar empleo';
+  if (key === 'sin buscar empleo') return 'Sin buscar empleo';
+  return null;
 };
 
 const toIsoDate = (year: number, month: number, day: number) => {
@@ -150,6 +234,10 @@ const normalizeAsciiUpper = (value: unknown) =>
     .replace(/[\u0300-\u036f]/g, '')
     .toUpperCase();
 
+const normalizeCourseCodeInput = (value: unknown) => normalizeAsciiUpper(value).replace(/\s+/g, '');
+
+const normalizeExpedienteInput = (value: unknown) => normalizeAsciiUpper(value).replace(/\s+/g, '');
+
 const normalizeOptionalDate = (value: unknown) => {
   const cleaned = norm(value);
   if (!cleaned) return null;
@@ -197,6 +285,12 @@ function normalizeLeaveNotificationInput(value: unknown) {
   if (['NOTIFICADA', 'FIRMADA', 'EXPULSION'].includes(key)) return key;
   throw new Error('leave_notification inválido');
 }
+
+const isDuplicateEntryError = (error: unknown) =>
+  typeof error === 'object' &&
+  error !== null &&
+  'code' in error &&
+  (error as { code?: string }).code === 'ER_DUP_ENTRY';
 
 function splitFullName(full: string): { first_names: string; last_names: string } {
   const parts = norm(full).split(/\s+/).filter(Boolean);
@@ -264,6 +358,13 @@ function normalizeStudentInput(raw: Record<string, unknown>): StudentPayload {
     ),
     email: normalizeEmail(
       pickValue(raw, ['email', 'correo', 'E-MAIL'])
+    ),
+    tic: normalizeTic(
+      pickValue(raw, ['tic', 'TIC']),
+      'NO'
+    ),
+    status_laboral: normalizeStatusLaboral(
+      pickValue(raw, ['status_laboral', 'status laboral', 'STATUS LABORAL'])
     ),
     notes: toNull(
       pickValue(raw, ['notes', 'observaciones', 'OBSERVACIONES'])
@@ -530,7 +631,7 @@ router.post('/import', async (req, res) => {
     const inserted = validRows.filter((r) => !existingDni.has(r.dni_nie)).length;
     const updated = validRows.length - inserted;
 
-    const placeholders = validRows.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(',');
+    const placeholders = validRows.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(',');
     const sql = `
       INSERT INTO students
       (
@@ -544,6 +645,8 @@ router.post('/import', async (req, res) => {
         municipality_code,
         phone,
         email,
+        tic,
+        status_laboral,
         notes
       )
       VALUES ${placeholders}
@@ -557,6 +660,8 @@ router.post('/import', async (req, res) => {
         municipality_code = VALUES(municipality_code),
         phone = VALUES(phone),
         email = VALUES(email),
+        tic = VALUES(tic),
+        status_laboral = VALUES(status_laboral),
         notes = VALUES(notes)
     `;
 
@@ -573,6 +678,8 @@ router.post('/import', async (req, res) => {
         r.municipality_code,
         r.phone,
         r.email,
+        r.tic,
+        r.status_laboral,
         r.notes,
       ])
     );
@@ -609,9 +716,11 @@ router.post('/', async (req, res) => {
         municipality_code,
         phone,
         email,
+        tic,
+        status_laboral,
         notes
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const [result] = await pool.query(query, [
@@ -625,6 +734,8 @@ router.post('/', async (req, res) => {
       payload.municipality_code,
       payload.phone,
       payload.email,
+      payload.tic,
+      payload.status_laboral,
       payload.notes,
     ]);
 
@@ -663,6 +774,8 @@ router.put('/:id', async (req, res) => {
         municipality_code = ?,
         phone = ?,
         email = ?,
+        tic = ?,
+        status_laboral = ?,
         notes = ?
       WHERE id = ?
     `;
@@ -678,6 +791,8 @@ router.put('/:id', async (req, res) => {
       payload.municipality_code,
       payload.phone,
       payload.email,
+      payload.tic,
+      payload.status_laboral,
       payload.notes,
       id,
     ]);
@@ -716,6 +831,7 @@ router.get('/:id/enrolled-courses', async (req, res) => {
           cis.expediente,
           cis.course_code,
           cis.dni_nie,
+          cis.effective_start_date,
           cis.leave_date,
           cis.leave_reason,
           cis.leave_notification,
@@ -740,14 +856,115 @@ router.get('/:id/enrolled-courses', async (req, res) => {
   }
 });
 
+async function getStudentById(studentId: number): Promise<{ dni_nie: string } | null> {
+  const [studentRows] = await pool.query('SELECT dni_nie FROM students WHERE id = ?', [studentId]);
+  const student = (studentRows as Array<{ dni_nie: string }>)[0];
+  return student ?? null;
+}
+
+async function getCourseItineraryMeta(courseCode: string): Promise<{ course_code: string; formation_start_date: unknown } | null> {
+  const [rows] = await pool.query(
+    `SELECT course_code, formation_start_date
+     FROM course_itineraries
+     WHERE course_code = ?
+     LIMIT 1`,
+    [courseCode]
+  );
+  const itinerary = (rows as Array<{ course_code: string; formation_start_date: unknown }>)[0];
+  return itinerary ?? null;
+}
+
+function normalizeStoredDate(value: unknown): string | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+  const cleaned = norm(value);
+  if (!cleaned) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) return cleaned;
+  return normalizeOptionalDate(cleaned);
+}
+
+router.post('/:id/enrolled-courses', async (req, res) => {
+  const studentId = Number(req.params.id);
+  if (!Number.isFinite(studentId)) {
+    return res.status(400).json({ error: 'id must be a number' });
+  }
+
+  const expediente = normalizeExpedienteInput(req.body?.expediente);
+  const courseCode = normalizeCourseCodeInput(req.body?.course_code);
+  if (!expediente || !courseCode) {
+    return res.status(400).json({ error: 'course_code y expediente son obligatorios' });
+  }
+
+  let courseStatus: 'APTO' | 'NO APTO' | 'INSERCION';
+  let leaveDate: string | null = null;
+  let leaveReason: string | null = null;
+  let leaveNotification: string | null = null;
+  let effectiveStartDate: string | null = null;
+
+  try {
+    courseStatus = normalizeCourseStatusInput(req.body?.course_status);
+    leaveDate = normalizeOptionalDate(req.body?.leave_date);
+    leaveReason = normalizeLeaveReasonInput(req.body?.leave_reason);
+    leaveNotification = normalizeLeaveNotificationInput(req.body?.leave_notification);
+    effectiveStartDate = normalizeOptionalDate(req.body?.effective_start_date);
+  } catch (e) {
+    return res.status(400).json({ error: (e as Error).message });
+  }
+
+  if (courseStatus === 'APTO') {
+    leaveDate = null;
+    leaveReason = null;
+    leaveNotification = null;
+  }
+
+  try {
+    const student = await getStudentById(studentId);
+    if (!student) {
+      return res.status(404).json({ error: 'No encontrado' });
+    }
+
+    const courseItinerary = await getCourseItineraryMeta(courseCode);
+    if (!courseItinerary) {
+      return res.status(400).json({ error: 'course_code no existe en itinerarios' });
+    }
+
+    const fallbackEffectiveStartDate = normalizeStoredDate(courseItinerary.formation_start_date);
+    const resolvedEffectiveStartDate = effectiveStartDate ?? fallbackEffectiveStartDate;
+
+    await pool.query(
+      `INSERT INTO course_itinerary_students
+       (course_code, expediente, dni_nie, effective_start_date, leave_date, leave_reason, leave_notification, course_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        courseCode,
+        expediente,
+        student.dni_nie,
+        resolvedEffectiveStartDate,
+        leaveDate,
+        leaveReason,
+        leaveNotification,
+        courseStatus,
+      ]
+    );
+
+    return res.status(201).json({ message: 'Itinerario creado' });
+  } catch (e) {
+    if (isDuplicateEntryError(e)) {
+      return res.status(409).json({ error: 'Ya existe un itinerario con ese expediente' });
+    }
+    return res.status(500).json({ error: 'Error', details: (e as Error).message });
+  }
+});
+
 router.put('/:id/enrolled-courses/:expediente', async (req, res) => {
   const studentId = Number(req.params.id);
   if (!Number.isFinite(studentId)) {
     return res.status(400).json({ error: 'id must be a number' });
   }
 
-  const expediente = normalizeAsciiUpper(req.params.expediente);
-  if (!expediente) {
+  const currentExpediente = normalizeExpedienteInput(req.params.expediente);
+  if (!currentExpediente) {
     return res.status(400).json({ error: 'expediente is required' });
   }
 
@@ -772,17 +989,70 @@ router.put('/:id/enrolled-courses/:expediente', async (req, res) => {
   }
 
   try {
-    const [studentRows] = await pool.query('SELECT dni_nie FROM students WHERE id = ?', [studentId]);
-    const student = (studentRows as Array<{ dni_nie: string }>)[0];
+    const student = await getStudentById(studentId);
     if (!student) {
       return res.status(404).json({ error: 'No encontrado' });
     }
 
+    const [existingRows] = await pool.query(
+      `SELECT expediente, course_code, effective_start_date
+       FROM course_itinerary_students
+       WHERE dni_nie = ? AND expediente = ?
+       LIMIT 1`,
+      [student.dni_nie, currentExpediente]
+    );
+    const existing = (existingRows as Array<{ expediente: string; course_code: string; effective_start_date: unknown }>)[0];
+    if (!existing) {
+      return res.status(404).json({ error: 'Itinerario no encontrado para este alumno' });
+    }
+
+    const nextExpediente = normalizeExpedienteInput(req.body?.expediente ?? currentExpediente);
+    const requestedCourseCode = normalizeCourseCodeInput(req.body?.course_code);
+    const nextCourseCode = requestedCourseCode || normalizeCourseCodeInput(existing.course_code);
+
+    if (!nextExpediente || !nextCourseCode) {
+      return res.status(400).json({ error: 'course_code y expediente son obligatorios' });
+    }
+
+    const courseItinerary = await getCourseItineraryMeta(nextCourseCode);
+    if (!courseItinerary) {
+      return res.status(400).json({ error: 'course_code no existe en itinerarios' });
+    }
+
+    const hasEffectiveStartDateInBody =
+      req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'effective_start_date');
+    const effectiveStartDateFromBody = hasEffectiveStartDateInBody
+      ? normalizeOptionalDate(req.body?.effective_start_date)
+      : null;
+    const fallbackEffectiveStartDate =
+      normalizeStoredDate(existing.effective_start_date) ??
+      normalizeStoredDate(courseItinerary.formation_start_date);
+    const resolvedEffectiveStartDate = hasEffectiveStartDateInBody
+      ? effectiveStartDateFromBody
+      : fallbackEffectiveStartDate;
+
     const [result] = await pool.query(
       `UPDATE course_itinerary_students
-       SET course_status = ?, leave_date = ?, leave_reason = ?, leave_notification = ?
+       SET
+         expediente = ?,
+         course_code = ?,
+         effective_start_date = ?,
+         course_status = ?,
+         leave_date = ?,
+         leave_reason = ?,
+         leave_notification = ?
        WHERE dni_nie = ? AND expediente = ?`,
-      [courseStatus, leaveDate, leaveReason, leaveNotification, student.dni_nie, expediente]
+      [
+        nextExpediente,
+        nextCourseCode,
+        resolvedEffectiveStartDate,
+        courseStatus,
+        leaveDate,
+        leaveReason,
+        leaveNotification,
+        student.dni_nie,
+        currentExpediente,
+      ]
     );
 
     if ((result as any).affectedRows === 0) {
@@ -791,6 +1061,9 @@ router.put('/:id/enrolled-courses/:expediente', async (req, res) => {
 
     return res.json({ message: 'Itinerario actualizado' });
   } catch (e) {
+    if (isDuplicateEntryError(e)) {
+      return res.status(409).json({ error: 'Ya existe un itinerario con ese expediente' });
+    }
     return res.status(500).json({ error: 'Error', details: (e as Error).message });
   }
 });

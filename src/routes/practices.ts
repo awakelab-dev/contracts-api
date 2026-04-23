@@ -5,6 +5,56 @@ import { requireAuth } from '../middleware/auth.js';
 const router = Router();
 
 router.use(requireAuth);
+let ensurePracticesSchemaPromise: Promise<void> | null = null;
+
+async function hasColumn(tableName: string, columnName: string): Promise<boolean> {
+  const [rows] = await pool.query(
+    `SELECT COUNT(*) AS c
+     FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = ?
+       AND column_name = ?`,
+    [tableName, columnName]
+  );
+  return Number((rows as Array<{ c: number }>)[0]?.c || 0) > 0;
+}
+
+async function ensureColumn(tableName: string, columnName: string, definitionSql: string) {
+  const exists = await hasColumn(tableName, columnName);
+  if (exists) return;
+  await pool.query(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definitionSql}`);
+}
+
+async function ensurePracticesSchema() {
+  if (ensurePracticesSchemaPromise) {
+    await ensurePracticesSchemaPromise;
+    return;
+  }
+
+  ensurePracticesSchemaPromise = (async () => {
+    await ensureColumn('practices', 'tutor_emha', 'VARCHAR(190) NULL AFTER workplace');
+    await ensureColumn('practices', 'tutor_company', 'VARCHAR(190) NULL AFTER tutor_emha');
+  })();
+
+  try {
+    await ensurePracticesSchemaPromise;
+  } catch (error) {
+    ensurePracticesSchemaPromise = null;
+    throw error;
+  }
+}
+
+router.use(async (req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
+  try {
+    await ensurePracticesSchema();
+    return next();
+  } catch (e) {
+    return res.status(500).json({ error: 'Error al preparar esquema de prácticas', details: (e as Error).message });
+  }
+});
 
 const norm = (v: any) => (v ?? '').toString().trim();
 const toNull = (v: any) => {
@@ -161,6 +211,8 @@ router.post('/', async (req, res) => {
     company_id,
     company_name,
     workplace,
+    tutor_emha,
+    tutor_company,
     does_practices,
     conditions_for_practice,
     practice_shift,
@@ -201,8 +253,8 @@ router.post('/', async (req, res) => {
 
     const sql = `
       INSERT INTO practices
-      (expediente, company_id, company_name, workplace, does_practices, conditions_for_practice, practice_shift, observations, start_date, end_date, attendance_days, schedule, evaluation, practice_status, leave_date)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (expediente, company_id, company_name, workplace, tutor_emha, tutor_company, does_practices, conditions_for_practice, practice_shift, observations, start_date, end_date, attendance_days, schedule, evaluation, practice_status, leave_date)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const [result] = await pool.query(sql, [
@@ -210,6 +262,8 @@ router.post('/', async (req, res) => {
       company.companyId,
       company.companyName,
       toNull(workplace),
+      toNull(tutor_emha),
+      toNull(tutor_company),
       doesPractices,
       toNull(conditions_for_practice),
       toNull(practice_shift),
@@ -240,6 +294,8 @@ router.put('/:id', async (req, res) => {
     company_id,
     company_name,
     workplace,
+    tutor_emha,
+    tutor_company,
     does_practices,
     conditions_for_practice,
     practice_shift,
@@ -280,7 +336,7 @@ router.put('/:id', async (req, res) => {
 
     const sql = `
       UPDATE practices
-      SET expediente = ?, company_id = ?, company_name = ?, workplace = ?, does_practices = ?, conditions_for_practice = ?, practice_shift = ?, observations = ?, start_date = ?, end_date = ?, attendance_days = ?, schedule = ?, evaluation = ?, practice_status = ?, leave_date = ?
+      SET expediente = ?, company_id = ?, company_name = ?, workplace = ?, tutor_emha = ?, tutor_company = ?, does_practices = ?, conditions_for_practice = ?, practice_shift = ?, observations = ?, start_date = ?, end_date = ?, attendance_days = ?, schedule = ?, evaluation = ?, practice_status = ?, leave_date = ?
       WHERE id = ?
     `;
 
@@ -289,6 +345,8 @@ router.put('/:id', async (req, res) => {
       company.companyId,
       company.companyName,
       toNull(workplace),
+      toNull(tutor_emha),
+      toNull(tutor_company),
       doesPractices,
       toNull(conditions_for_practice),
       toNull(practice_shift),
