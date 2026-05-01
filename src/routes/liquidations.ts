@@ -7,8 +7,6 @@ router.use(requireAuth);
 
 type Target = 'six_months' | 'one_year';
 type Mode = 'individual' | 'pooled';
-
-const FULL_TIME_HOURS_PER_WEEK = 40;
 const TARGET_FTE_DAYS: Record<Target, number> = {
   // Basado en 5 días/semana. 1 año = 52*5 = 260. 6 meses = 26*5 = 130.
   six_months: 130,
@@ -57,33 +55,6 @@ function minDate(a: Date, b: Date): Date {
   return a.getTime() <= b.getTime() ? a : b;
 }
 
-function parsePct(v: any): number | null {
-  const s = norm(v);
-  if (!s) return null;
-  const m = /^([0-9]+(?:\.[0-9]+)?)\s*%$/.exec(s);
-  if (!m) return null;
-  const n = Number(m[1]);
-  if (!Number.isFinite(n)) return null;
-  return n / 100;
-}
-
-function fullTimeFactor(workday_pct: any, weekly_hours: any): number {
-  const wh = Number(weekly_hours);
-  if (Number.isFinite(wh) && wh > 0) {
-    return Math.max(0, Math.min(1, wh / FULL_TIME_HOURS_PER_WEEK));
-  }
-
-  const pct = parsePct(workday_pct);
-  if (pct != null) return Math.max(0, Math.min(1, pct));
-
-  const wd = norm(workday_pct).toLowerCase();
-  if (!wd) return 1;
-  if (wd === 'tiempo completo') return 1;
-  if (wd === 'tiempo parcial') return 0.5;
-  // Asumimos 1 por defecto: el valor real depende de horas/semana.
-  if (wd === 'fijo discontínuo' || wd === 'fijo discontinuo') return 1;
-  return 1;
-}
 
 function valueToISODateString(v: any): string | null {
   if (!v) return null;
@@ -122,29 +93,27 @@ async function computeAddedFteDaysByStudentId(conn: any, start: Date, end: Date,
   let studentFilterSql = '';
   if (studentIds && studentIds.length) {
     const placeholders = studentIds.map(() => '?').join(',');
-    studentFilterSql = ` AND hc.student_id IN (${placeholders}) `;
+    studentFilterSql = ` AND s.id IN (${placeholders}) `;
     params.push(...studentIds);
   }
 
   const [rows] = await conn.query(
     `
       SELECT
-        hc.id,
-        hc.student_id,
-        hc.start_date,
-        hc.end_date,
-        hc.weekly_hours,
-        hc.workday_pct,
-        hc.contributed_days,
+        DISTINCT
+        ec.id,
+        s.id AS student_id,
+        ec.start_date,
+        ec.end_date,
         s.first_names,
         s.last_names
-      FROM hiring_contracts hc
-      JOIN students s ON s.id = hc.student_id
+      FROM employment_contracts ec
+      INNER JOIN course_itinerary_students cis ON cis.expediente = ec.expediente
+      INNER JOIN students s ON s.dni_nie = cis.dni_nie
       WHERE
-        hc.contributed_days IS NOT NULL
-        AND hc.contributed_days > 0
-        AND hc.start_date <= ?
-        AND (hc.end_date IS NULL OR hc.end_date >= ?)
+        ec.start_date IS NOT NULL
+        AND ec.start_date <= ?
+        AND (ec.end_date IS NULL OR ec.end_date >= ?)
         ${studentFilterSql}
     `,
     params
@@ -163,8 +132,6 @@ async function computeAddedFteDaysByStudentId(conn: any, start: Date, end: Date,
       last_names: norm(r.last_names),
     });
 
-    const contributed_days = Number(r.contributed_days);
-    if (!Number.isFinite(contributed_days) || contributed_days <= 0) continue;
 
     const startStr = valueToISODateString(r.start_date) || valueToISODateString(norm(r.start_date));
     const contractStart = startStr ? parseISODateUTC(startStr) : null;
@@ -185,9 +152,7 @@ async function computeAddedFteDaysByStudentId(conn: any, start: Date, end: Date,
 
     const overlapDays = daysBetweenInclusive(overlapStart, overlapEnd);
     const fraction = overlapDays / duration;
-
-    const factor = fullTimeFactor(r.workday_pct, r.weekly_hours);
-    const fteTotal = contributed_days * factor;
+    const fteTotal = duration;
     const fteInRange = fteTotal * fraction;
 
     const prev = added.get(student_id) || 0;
@@ -211,22 +176,24 @@ async function computeEligibleFromByStudentId(conn: any, minStart: Date | null, 
   let studentFilterSql = '';
   if (studentIds && studentIds.length) {
     const placeholders = studentIds.map(() => '?').join(',');
-    studentFilterSql = ` AND hc.student_id IN (${placeholders}) `;
+    studentFilterSql = ` AND s.id IN (${placeholders}) `;
     params.push(...studentIds);
   }
 
   const [rows] = await conn.query(
     `
       SELECT
-        hc.student_id,
-        hc.start_date,
-        hc.end_date
-      FROM hiring_contracts hc
+        DISTINCT
+        s.id AS student_id,
+        ec.start_date,
+        ec.end_date
+      FROM employment_contracts ec
+      INNER JOIN course_itinerary_students cis ON cis.expediente = ec.expediente
+      INNER JOIN students s ON s.dni_nie = cis.dni_nie
       WHERE
-        hc.contributed_days IS NOT NULL
-        AND hc.contributed_days > 0
-        AND hc.start_date <= ?
-        AND (hc.end_date IS NULL OR hc.end_date >= ?)
+        ec.start_date IS NOT NULL
+        AND ec.start_date <= ?
+        AND (ec.end_date IS NULL OR ec.end_date >= ?)
         ${studentFilterSql}
     `,
     params

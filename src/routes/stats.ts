@@ -107,14 +107,18 @@ router.get('/summary', async (_req, res) => {
     const [sRes, eiRes, ceRes, mRes, vRes] = await Promise.all([
       pool.query("SELECT COUNT(*) AS total_students FROM students"),
       pool.query(
-        `SELECT COUNT(DISTINCT student_id) AS employed_or_improved
-         FROM hiring_contracts`
+        `SELECT COUNT(DISTINCT s.id) AS employed_or_improved
+         FROM employment_contracts ec
+         INNER JOIN course_itinerary_students cis ON cis.expediente = ec.expediente
+         INNER JOIN students s ON s.dni_nie = cis.dni_nie`
       ),
       pool.query(
-        `SELECT COUNT(DISTINCT student_id) AS currently_employed
-         FROM hiring_contracts
-         WHERE start_date <= CURDATE()
-           AND (end_date IS NULL OR end_date >= CURDATE())`
+        `SELECT COUNT(DISTINCT s.id) AS currently_employed
+         FROM employment_contracts ec
+         INNER JOIN course_itinerary_students cis ON cis.expediente = ec.expediente
+         INNER JOIN students s ON s.dni_nie = cis.dni_nie
+         WHERE ec.start_date <= CURDATE()
+           AND (ec.end_date IS NULL OR ec.end_date >= CURDATE())`
       ),
       pool.query(
         "SELECT COUNT(*) AS missing_cvs FROM students s LEFT JOIN documents d ON s.id = d.student_id AND d.type = 'cv' WHERE d.id IS NULL"
@@ -151,8 +155,8 @@ router.get('/reports', async (req, res) => {
         SELECT MIN(start_date) AS d FROM practices
         UNION ALL SELECT MIN(end_date) AS d FROM practices WHERE end_date IS NOT NULL
         UNION ALL SELECT MIN(interview_date) AS d FROM interviews
-        UNION ALL SELECT MIN(start_date) AS d FROM hiring_contracts
-        UNION ALL SELECT MIN(end_date) AS d FROM hiring_contracts WHERE end_date IS NOT NULL
+        UNION ALL SELECT MIN(start_date) AS d FROM employment_contracts
+        UNION ALL SELECT MIN(end_date) AS d FROM employment_contracts WHERE end_date IS NOT NULL
         UNION ALL SELECT MIN(COALESCE(end_date, start_date)) AS d FROM student_courses
       ) t`
     );
@@ -226,15 +230,21 @@ router.get('/reports', async (req, res) => {
       ),
 
       pool.query(
-        "SELECT COUNT(DISTINCT student_id) AS cnt FROM hiring_contracts WHERE start_date BETWEEN ? AND ?",
+        `SELECT COUNT(DISTINCT s.id) AS cnt
+         FROM employment_contracts ec
+         INNER JOIN course_itinerary_students cis ON cis.expediente = ec.expediente
+         INNER JOIN students s ON s.dni_nie = cis.dni_nie
+         WHERE ec.start_date BETWEEN ? AND ?`,
         [periodStart, periodEnd]
       ),
 
       pool.query(
-        `SELECT COUNT(DISTINCT student_id) AS cnt
-         FROM hiring_contracts
-         WHERE DATE_ADD(start_date, INTERVAL 6 MONTH) BETWEEN ? AND ?
-           AND (end_date IS NULL OR end_date >= DATE_ADD(start_date, INTERVAL 6 MONTH))`,
+        `SELECT COUNT(DISTINCT s.id) AS cnt
+         FROM employment_contracts ec
+         INNER JOIN course_itinerary_students cis ON cis.expediente = ec.expediente
+         INNER JOIN students s ON s.dni_nie = cis.dni_nie
+         WHERE DATE_ADD(ec.start_date, INTERVAL 6 MONTH) BETWEEN ? AND ?
+           AND (ec.end_date IS NULL OR ec.end_date >= DATE_ADD(ec.start_date, INTERVAL 6 MONTH))`,
         [periodStart, periodEnd]
       ),
 
@@ -249,9 +259,14 @@ router.get('/reports', async (req, res) => {
             fc.first_contract_start,
             COALESCE(sc.course_end, pr.last_practice_end) AS itinerary_end
           FROM (
-            SELECT student_id, MIN(start_date) AS first_contract_start
-            FROM hiring_contracts
-            GROUP BY student_id
+            SELECT
+              s.id AS student_id,
+              MIN(ec.start_date) AS first_contract_start
+            FROM employment_contracts ec
+            INNER JOIN course_itinerary_students cis ON cis.expediente = ec.expediente
+            INNER JOIN students s ON s.dni_nie = cis.dni_nie
+            WHERE ec.start_date IS NOT NULL
+            GROUP BY s.id
           ) fc
           LEFT JOIN (
             SELECT student_id, MAX(COALESCE(end_date, start_date)) AS course_end
