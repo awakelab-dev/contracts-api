@@ -1067,6 +1067,39 @@ router.put('/:id/enrolled-courses/:expediente', async (req, res) => {
     return res.status(500).json({ error: 'Error', details: (e as Error).message });
   }
 });
+
+router.delete('/:id/enrolled-courses/:expediente', async (req, res) => {
+  const studentId = Number(req.params.id);
+  if (!Number.isFinite(studentId)) {
+    return res.status(400).json({ error: 'id must be a number' });
+  }
+
+  const expediente = normalizeExpedienteInput(req.params.expediente);
+  if (!expediente) {
+    return res.status(400).json({ error: 'expediente is required' });
+  }
+
+  try {
+    const student = await getStudentById(studentId);
+    if (!student) {
+      return res.status(404).json({ error: 'No encontrado' });
+    }
+
+    const [result] = await pool.query(
+      `DELETE FROM course_itinerary_students
+       WHERE dni_nie = ? AND expediente = ?`,
+      [student.dni_nie, expediente]
+    );
+
+    if ((result as any).affectedRows === 0) {
+      return res.status(404).json({ error: 'Itinerario no encontrado para este alumno' });
+    }
+
+    return res.json({ message: 'Itinerario eliminado' });
+  } catch (e) {
+    return res.status(500).json({ error: 'Error', details: (e as Error).message });
+  }
+});
 router.get('/:id', async (req, res) => {
   try {
     const [rows] = await pool.query(`${STUDENT_SELECT} WHERE s.id = ?`, [req.params.id]);
@@ -1078,8 +1111,70 @@ router.get('/:id', async (req, res) => {
 });
 
 router.delete('/:id', async (req, res) => {
+  const studentId = Number(req.params.id);
+  if (!Number.isFinite(studentId)) {
+    return res.status(400).json({ error: 'id must be a number' });
+  }
   try {
-    await pool.query('DELETE FROM students WHERE id = ?', [req.params.id]);
+    const [studentRows] = await pool.query(
+      'SELECT id, dni_nie FROM students WHERE id = ? LIMIT 1',
+      [studentId]
+    );
+    const student = (studentRows as Array<{ id: number; dni_nie: string }>)[0];
+    if (!student) {
+      return res.status(404).json({ error: 'No encontrado' });
+    }
+
+    const [associatedRows] = await pool.query(
+      `SELECT
+         (SELECT COUNT(*) FROM invitations WHERE student_id = ?) AS invitations_count,
+         (SELECT COUNT(*) FROM interviews WHERE student_id = ?) AS interviews_count,
+         (SELECT COUNT(*) FROM course_itinerary_students WHERE dni_nie = ?) AS courses_count,
+         (
+           SELECT COUNT(*)
+           FROM practices p
+           INNER JOIN course_itinerary_students cis ON cis.expediente = p.expediente
+           WHERE cis.dni_nie = ?
+         ) AS practices_count,
+         (
+           SELECT COUNT(*)
+           FROM employment_contracts ec
+           INNER JOIN course_itinerary_students cis ON cis.expediente = ec.expediente
+           WHERE cis.dni_nie = ?
+         ) AS contracts_count`,
+      [student.id, student.id, student.dni_nie, student.dni_nie, student.dni_nie]
+    );
+
+    const counts = (associatedRows as Array<{
+      invitations_count: number;
+      interviews_count: number;
+      courses_count: number;
+      practices_count: number;
+      contracts_count: number;
+    }>)[0];
+
+    const hasAssociatedData =
+      Number(counts?.invitations_count || 0) > 0 ||
+      Number(counts?.interviews_count || 0) > 0 ||
+      Number(counts?.courses_count || 0) > 0 ||
+      Number(counts?.practices_count || 0) > 0 ||
+      Number(counts?.contracts_count || 0) > 0;
+
+    if (hasAssociatedData) {
+      return res.status(409).json({
+        error:
+          'No se puede eliminar el alumno porque tiene datos asociados. Elimina manualmente invitaciones, entrevistas, cursos, prácticas y contrataciones primero.',
+        associated_data: {
+          invitations: Number(counts?.invitations_count || 0),
+          interviews: Number(counts?.interviews_count || 0),
+          enrolled_courses: Number(counts?.courses_count || 0),
+          practices: Number(counts?.practices_count || 0),
+          contracts: Number(counts?.contracts_count || 0),
+        },
+      });
+    }
+
+    await pool.query('DELETE FROM students WHERE id = ?', [studentId]);
     return res.json({ message: 'Eliminado correctamente' });
   } catch (e) {
     return res.status(500).json({ error: 'Error al eliminar', details: (e as Error).message });
