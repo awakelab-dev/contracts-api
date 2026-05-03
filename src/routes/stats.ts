@@ -330,4 +330,64 @@ router.get('/reports', async (req, res) => {
   }
 });
 
+// GET /stats/reports/inserciones
+router.get('/reports/inserciones', async (_req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `
+        SELECT
+          ec.id AS insertion_id,
+          ec.expediente,
+          s.id AS student_id,
+          ci.itinerary_name,
+          s.first_names,
+          s.last_names,
+          s.dni_nie,
+          s.phone,
+          s.email,
+          cis.course_status,
+          ci.formation_end_date,
+          COALESCE(p.company_name, pc.name) AS practice_company_name,
+          p.start_date AS practice_start_date,
+          p.end_date AS practice_end_date,
+          p.does_practices AS practice_does_practices,
+          p.observations AS practice_observations,
+          sec.sector_name AS insertion_sector_name,
+          ec.position AS insertion_position,
+          ic.name AS insertion_company_name,
+          ec.is_itinerary_company_contract,
+          cc.code AS contract_code,
+          cc.contract_type,
+          cc.workday,
+          cc.hiring_mode,
+          ec.attached_contract,
+          ec.attached_work_life,
+          ec.observations AS insertion_observations,
+          ec.start_date AS insertion_start_date,
+          ec.end_date AS insertion_end_date
+        FROM employment_contracts ec
+        INNER JOIN course_itinerary_students cis ON cis.expediente = ec.expediente
+        INNER JOIN students s ON s.dni_nie = cis.dni_nie
+        LEFT JOIN course_itineraries ci ON ci.course_code = cis.course_code
+        LEFT JOIN practices p ON p.id = (
+          SELECT p2.id
+          FROM practices p2
+          WHERE p2.expediente = ec.expediente
+          ORDER BY COALESCE(p2.end_date, p2.start_date, '1000-01-01') DESC, p2.id DESC
+          LIMIT 1
+        )
+        LEFT JOIN companies pc ON pc.id = p.company_id
+        LEFT JOIN sectors sec ON sec.id = ec.sector_id
+        LEFT JOIN companies ic ON ic.id = ec.company_id
+        LEFT JOIN contract_codes cc ON cc.code = ec.contract_code
+        ORDER BY ec.expediente ASC, COALESCE(ec.start_date, ec.end_date, '1000-01-01') DESC, ec.id DESC
+      `
+    );
+
+    return res.json(rows);
+  } catch (e) {
+    return res.status(500).json({ error: 'Error al calcular informe de inserciones', details: (e as Error).message });
+  }
+});
+
 export default router;
